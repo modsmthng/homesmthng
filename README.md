@@ -47,7 +47,7 @@ Turns the LilyGO 2.1 T-RGB display into a smart switch dashboard for HomeKit wit
 	- The Pairing Code is displayed on Tile 4 (swipe down twice from the main screen).
 
 
-#DISCLAIMER
+# DISCLAIMER
 The code has been optimized and commented using AI.
 
 
