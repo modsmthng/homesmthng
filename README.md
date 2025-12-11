@@ -13,27 +13,27 @@ Turns the LilyGO 2.1 T-RGB display into a smart switch dashboard for HomeKit wit
 - lvgl, install version v8.3.11
 - GFX Library for Arduino, install version v1.4.2
 - TFT_eSPI, install version v2.5.22
-- (LV_Helper)
+- LV_Helper
 
 # For Arduino IDE: 
 - Arduino IDE Setting	Value
-- Board	ESP32S3 Dev Module
-- Port	Your port
-- USB CDC On Boot	Enable
-- CPU Frequency	240MHZ(WiFi)
-- Core Debug Level	None
-- USB DFU On Boot	Disable
-- Erase All Flash Before Sketch Upload	Disable
-- Events Run On	Core1
-- Flash Mode	QIO 80MHZ
-- Flash Size	16MB(128Mb)
-- Arduino Runs On	Core1
-- USB Firmware MSC On Boot	Disable
-- Partition Scheme	16M Flash(3M APP/9.9MB FATFS)
-- PSRAM	OPI PSRAM
-- Upload Mode	UART0/Hardware CDC
-- Upload Speed	921600
-- USB Mode	CDC and JTAG
+	- Board	ESP32S3 Dev Module
+	- Port	Your port
+	- USB CDC On Boot	Enable
+	- CPU Frequency	240MHZ(WiFi)
+	- Core Debug Level	None
+	- USB DFU On Boot	Disable
+	- Erase All Flash Before Sketch Upload	Disable
+	- Events Run On	Core1
+	- Flash Mode	QIO 80MHZ
+	- Flash Size	16MB(128Mb)
+	- Arduino Runs On	Core1
+	- USB Firmware MSC On Boot	Disable
+	- Partition Scheme	16M Flash(3M APP/9.9MB FATFS)
+	- PSRAM	OPI PSRAM
+	- Upload Mode	UART0/Hardware CDC
+	- Upload Speed	921600
+	- USB Mode	CDC and JTAG
 
 # Post-Flash Setup
 1. Wi-Fi Setup: Wait for the Wi-Fi setup mode to start (this happens automatically if no credentials are found). Connect your phone or computer to the temporary access point named HOMEsmthng.
