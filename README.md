@@ -2,8 +2,9 @@
 Turns the LilyGO 2.1 T-RGB display into a smart switch dashboard for HomeKit with HomeSpan.
 
 # Prerequisites (Hardware & Software)
-- Display	: LilyGo T-RGB (480x480 ESP32-S3)
-- IDE/Framework:	Arduino IDE or VS Code (PlatformIO)
+- Display: LilyGo T-RGB (480x480 ESP32-S3)
+- Used housing: https://www.printables.com/model/1492077-minimalist-housing-with-frame-for-the-lilygo-t-rgb 
+- IDE/Framework: Arduino IDE or VS Code (PlatformIO)
 - Board Support: esp32 Board Manager (minimum version 2.0.x)
 
 # Libraries (Crucial for easy installation)
