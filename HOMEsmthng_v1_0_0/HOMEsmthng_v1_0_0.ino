@@ -63,7 +63,7 @@ lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
 
 // Farbschema (HEX-Werte)
 const uint32_t color_hex_options[] = {
-    0xFF0000, 0xFFFF00, 0x00FF00, 0x0000FF, 0x68724D, 0xF99963
+    0xFF0000, 0xFF9900, 0xFFFFFF, 0x0000FF, 0x68724D, 0xF99963
 };
 const int NUM_COLORS = 6;
 
