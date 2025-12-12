@@ -1,7 +1,7 @@
 /**
  * @file      HOMEsmthng.ino
  * @author    modsmthng
- * @date      10.12.2025 V1.0.0
+ * @date      10.12.2025 V1.0.1 (UI Cleanup)
 **/
 
 #include <Arduino.h>
@@ -63,7 +63,7 @@ lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
 
 // Farbschema (HEX-Werte)
 const uint32_t color_hex_options[] = {
-    0xFF0000, 0xFF9900, 0xFFFFFF, 0x0000FF, 0x68724D, 0xF99963
+    0xFF0000, 0xFF9900, 0xCCCCCC, 0x0000FF, 0x68724D, 0xF99963 // << GEÄNDERT: 0xFFFFFF zu 0xCCCCCC
 };
 const int NUM_COLORS = 6;
 
@@ -128,44 +128,51 @@ void screen2_off_timer_cb(lv_timer_t * timer) {
     screen2_timer = NULL; 
 }
 
+/**
+ * @brief Aktualisiert das WiFi-Symbol und die Setup-Meldung auf Tile 1.
+ */
 void updateWiFiSymbol() {
     wl_status_t wifiStatus = WiFi.status();
+    
+    // Flag, um zu prüfen, ob der AP-Modus (Provisioning) aktiv ist
+    bool isAPModeActive = (wifiStatus == WL_IDLE_STATUS || wifiStatus == WL_NO_SSID_AVAIL || wifiStatus == WL_NO_SHIELD);
     
     if (wifiStatus == WL_CONNECTED) {
         // Zustand: Verbunden und OK
         lv_label_set_text(ui_wifi_label, LV_SYMBOL_WIFI);
         lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_GREEN), 0);
         
-        // Wenn eine Verbindung besteht, blende die Setup-Meldung aus und zeige Switches
-        lv_obj_add_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
-        for(int i = 0; i < 4; i++) {
-           lv_obj_clear_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
-        }
-        
-    } else if (wifiStatus == WL_IDLE_STATUS || wifiStatus == WL_NO_SSID_AVAIL || wifiStatus == WL_NO_SHIELD) {
+    } else if (isAPModeActive) {
         // Zustand: WiFi Manager / Provisioning wartet auf Konfiguration (AP aktiv)
         lv_label_set_text(ui_wifi_label, LV_SYMBOL_SETTINGS); // Zahnrad-Symbol
         lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_ORANGE), 0);
-        
-        // Wenn AP aktiv, zeige die Setup-Meldung und blende Switches aus
-        if (lv_tileview_get_tile_act(tileview) == tile1) {
-            lv_obj_clear_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
-            for(int i = 0; i < 4; i++) {
-               lv_obj_add_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
-            }
-        }
         
     } else {
         // Zustand: Verbindungsversuch/Fehler
         lv_label_set_text(ui_wifi_label, LV_SYMBOL_WARNING);
         lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_RED), 0);
-        
-        // Wenn keine Verbindung, zeige die Setup-Meldung
-        if (lv_tileview_get_tile_act(tileview) == tile1) {
+    }
+    
+    // Logik zur Steuerung der Sichtbarkeit der Setup-Meldung auf Tile 1 (um Flackern zu vermeiden)
+    static bool switches_hidden = false;
+    lv_obj_t * current_tile = lv_tileview_get_tile_act(tileview);
+
+    if (current_tile == tile1) {
+        if (isAPModeActive && !switches_hidden) {
+            // AP aktiv UND Switches sind noch sichtbar -> Verstecken und Meldung zeigen
             lv_obj_clear_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
             for(int i = 0; i < 4; i++) {
                lv_obj_add_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
             }
+            switches_hidden = true;
+
+        } else if (wifiStatus == WL_CONNECTED && switches_hidden) {
+            // Verbunden UND Switches sind versteckt -> Zeigen und Meldung verstecken
+            lv_obj_add_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
+            for(int i = 0; i < 4; i++) {
+               lv_obj_clear_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            switches_hidden = false;
         }
     }
 }
@@ -431,11 +438,7 @@ void setupUI() {
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
         ui_switch_buttons[i] = btn;
 
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, switch_names[i]);
-        lv_obj_center(lbl);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0); 
-        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        // >> LABEL FÜR SWITCHES ENTFERNT <<
     }
     
     // WiFi Setup Message Label
@@ -682,25 +685,10 @@ void setup() {
       }
   }
 
-  // Prüfen, ob der Setup AP aktiv ist, um die Meldung auf Tile 1 anzuzeigen
-  // Gib dem HomeSpan/WiFi-Stack kurz Zeit zum Initialisieren/Verbinden.
+  // Initialer Check, um die Setup-Meldung korrekt zu setzen
+  // Der Aufruf von updateWiFiSymbol() in loop() übernimmt dann die Logik.
   delay(100); 
-  
-  if (WiFi.status() != WL_CONNECTED) { 
-      // Wenn keine Verbindung besteht, ist der AP (HOMEsmthng) aktiv oder startet in Kürze.
-      
-      // 1. Zeige die Setup-Meldung.
-      lv_obj_clear_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
-      
-      // 2. Blende die vier kleinen Schalter aus, um die Mitte freizumachen.
-      for(int i = 0; i < 4; i++) {
-         lv_obj_add_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
-      }
-      
-  } else {
-      // Das Gerät ist verbunden. Die Switches S1-S4 sind standardmäßig sichtbar.
-      lv_obj_add_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
-  }
+  updateWiFiSymbol(); 
 
   // Setzt die Helligkeit auf den geladenen NVS-Wert
   safeSetBrightness(global_brightness);
