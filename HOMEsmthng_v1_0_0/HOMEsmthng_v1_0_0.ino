@@ -592,7 +592,7 @@ void setupUI() {
 
     // Fallback-Hinweis
     lv_obj_t * lbl_fallback = lv_label_create(tile4);
-    lv_label_set_text(lbl_fallback, "If pairing code doesn't work,\nplease try: 2244-6688, 8888-8888 or 1234-5678\n"
+    lv_label_set_text(lbl_fallback, "If pairing code doesn't work,\nplease try: 2244-6688, 4663-7726 or 1234-5678\n"
     "(Try to be as close to your router as possible,\n"
     "as this speeds up the process considerably and\n"
     "also prevents the pairing process from failing)"); 
