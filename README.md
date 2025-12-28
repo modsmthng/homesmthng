@@ -1,6 +1,15 @@
 # homesmthng
 Turns the LilyGO 2.1 T-RGB display into a smart switch dashboard for HomeKit with HomeSpan.
 
+https://youtu.be/96I17sV4fLk?si=4SN58w6wTHuDt7Tn
+
+Small fun project: Round screen and smart switches for Apple Home implemented with HomeSpan
+
+First screen with four switches,
+Second screen as a single large switch to replace a normal light switch – for this screen, it is also possible to completely deactivate the backlighting.
+
+Thanks to bidirectional synchronization, it is also possible to add switch logic with automations in the HomeApp, for example to switch scenes.
+
 # Prerequisites (Hardware & Software)
 - Display: LilyGo T-RGB (480x480 ESP32-S3)
 - Used housing: https://www.printables.com/model/1492077-minimalist-housing-with-frame-for-the-lilygo-t-rgb 
