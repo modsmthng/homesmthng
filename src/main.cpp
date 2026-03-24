@@ -10,6 +10,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WebServer.h>
 #include <lvgl.h>
 
 #include <math.h>
@@ -133,6 +134,7 @@ MySwitch *homekit_switches[kNumSwitches] = {};
 String HOMEKIT_PAIRING_CODE_STR = "22446688";
 const char *HOMEKIT_PAIRING_CODE = nullptr;
 String BRIDGE_SUFFIX_STR;
+String weather_location_name;
 
 lv_obj_t *ui_root = nullptr;
 lv_obj_t *ui_viewport = nullptr;
@@ -158,6 +160,11 @@ lv_obj_t *ui_timezone_status_label = nullptr;
 lv_obj_t *ui_timezone_modal = nullptr;
 lv_obj_t *ui_timezone_roller = nullptr;
 lv_obj_t *ui_timezone_done_button = nullptr;
+lv_obj_t *ui_weather_setup_button = nullptr;
+lv_obj_t *ui_weather_setup_value_label = nullptr;
+lv_obj_t *ui_weather_setup_modal = nullptr;
+lv_obj_t *ui_weather_setup_modal_text = nullptr;
+lv_obj_t *ui_weather_setup_done_button = nullptr;
 lv_obj_t *screensaver_overlay = nullptr;
 lv_obj_t *screensaver_clock_layer = nullptr;
 lv_obj_t *screensaver_clock_face = nullptr;
@@ -169,15 +176,17 @@ lv_obj_t *screensaver_weather_group = nullptr;
 lv_obj_t *screensaver_weather_icon = nullptr;
 lv_obj_t *screensaver_weather_temp_label = nullptr;
 lv_obj_t *screensaver_weather_sun_core = nullptr;
-lv_obj_t *screensaver_weather_sun_rays[4] = {};
+lv_obj_t *screensaver_weather_sun_rays[8] = {};
 lv_obj_t *screensaver_weather_cloud_parts[4] = {};
 lv_obj_t *screensaver_weather_rain_lines[3] = {};
 
 lv_point_t screensaver_hour_points[2] = {};
 lv_point_t screensaver_minute_points[2] = {};
 lv_point_t screensaver_second_points[2] = {};
+lv_point_t screensaver_weather_sun_ray_points[8][2] = {};
 
 lv_timer_t *screen2_timer = nullptr;
+WebServer weather_config_server(8080);
 
 int global_brightness = 12;
 int current_display_brightness = -1;
@@ -189,14 +198,19 @@ int pixel_shift_x = 0;
 int pixel_shift_y = 0;
 int timezone_index = kDefaultTimezoneIndex;
 bool timezone_sync_pending = true;
+bool weather_use_custom_location = false;
 bool weather_has_data = false;
 bool weather_refresh_pending = true;
 int weather_temperature_c = 0;
 int weather_code = 0;
 bool weather_is_day = true;
+float weather_custom_latitude = 0.0f;
+float weather_custom_longitude = 0.0f;
 unsigned long weather_last_request_ms = 0;
 unsigned long weather_last_success_ms = 0;
 WeatherGlyph weather_glyph = WeatherGlyph::Cloud;
+bool weather_config_server_routes_registered = false;
+bool weather_config_server_running = false;
 
 uint32_t active_switch_color_hex = 0x68724D;
 lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
@@ -204,6 +218,7 @@ lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
 uint8_t switch_button_ids[kNumUiSwitches] = {};
 uint8_t color_button_ids[kNumColors] = {};
 
+void saveSettingsToNVS();
 void updateLVGLState(uint8_t id, bool state);
 void updateWiFiSymbol();
 void safeSetBrightness(int target_brightness);
@@ -217,16 +232,31 @@ bool isPixelShiftEnabled();
 bool isClockSaverEnabled();
 int screensaverBrightness();
 int pixelShiftSafeCropInset();
-const WeatherLocation &selectedWeatherLocation();
+bool hasCustomWeatherLocation();
+bool isValidWeatherCoordinates(float latitude, float longitude);
+WeatherLocation selectedWeatherLocation();
+String selectedWeatherLocationLabel();
 void syncScreen2IdleTimer();
 void applyPixelShiftOffset(int shift_x, int shift_y);
 void updateScreensaverClock(bool force);
 void updateWeatherMonogram();
 bool extractJsonNumberField(const String &json, const char *key, float &value);
+bool parseFloatParameter(const String &text, float &value);
 WeatherGlyph glyphForWeatherCode(int code, bool is_day);
+const char *weatherGlyphLabel(WeatherGlyph glyph);
 void setScreensaverWeatherGlyph(WeatherGlyph glyph);
 bool fetchCurrentWeather();
 void updateWeatherIfNeeded();
+String htmlEscape(const String &text);
+String renderWebHomePage();
+String renderWeatherConfigPage(const String &message = "");
+void handleWebHome();
+void handleWeatherConfigRoot();
+void handleWeatherConfigSave();
+void handleWeatherConfigReset();
+void startWeatherConfigServer();
+void ensureWeatherConfigServer();
+void logWeatherConfigUrls();
 void hideScreensaver(bool user_wake);
 void updateOledProtection();
 void applyTimezoneSetting(bool request_sync);
@@ -235,9 +265,17 @@ void updateTimezoneButtonLabel();
 void updateTimezoneStatusLabel();
 void openTimezoneModal();
 void closeTimezoneModal();
+String weatherConfigStationUrl();
+String weatherConfigApUrl();
+void updateWeatherSetupButtonLabel();
+void updateWeatherSetupModalContent();
+void openWeatherSetupModal();
+void closeWeatherSetupModal();
 void timezone_button_event_handler(lv_event_t *e);
 void timezone_roller_event_handler(lv_event_t *e);
 void timezone_done_event_handler(lv_event_t *e);
+void weather_setup_button_event_handler(lv_event_t *e);
+void weather_setup_done_event_handler(lv_event_t *e);
 
 class MySwitch : public Service::Switch {
   public:
@@ -308,6 +346,16 @@ int pixelShiftSafeCropInset()
     return kPixelShiftAmplitude;
 }
 
+bool isValidWeatherCoordinates(float latitude, float longitude)
+{
+    return latitude >= -90.0f && latitude <= 90.0f && longitude >= -180.0f && longitude <= 180.0f;
+}
+
+bool hasCustomWeatherLocation()
+{
+    return weather_use_custom_location && isValidWeatherCoordinates(weather_custom_latitude, weather_custom_longitude);
+}
+
 const char *selectedTimezoneLabel()
 {
     if (timezone_index < 0 || timezone_index >= kNumTimezones) {
@@ -324,12 +372,28 @@ const char *selectedTimezoneRule()
     return kTimezoneRules[timezone_index];
 }
 
-const WeatherLocation &selectedWeatherLocation()
+WeatherLocation selectedWeatherLocation()
 {
+    if (hasCustomWeatherLocation()) {
+        return {weather_custom_latitude, weather_custom_longitude};
+    }
+
     if (timezone_index < 0 || timezone_index >= kNumTimezones) {
         timezone_index = kDefaultTimezoneIndex;
     }
     return kWeatherLocations[timezone_index];
+}
+
+String selectedWeatherLocationLabel()
+{
+    if (hasCustomWeatherLocation()) {
+        if (weather_location_name.length() > 0) {
+            return weather_location_name;
+        }
+        return String("Custom location");
+    }
+
+    return String(selectedTimezoneLabel());
 }
 
 void applyClockAccentColor(lv_color_t color)
@@ -351,7 +415,7 @@ void applyClockAccentColor(lv_color_t color)
     }
     for (lv_obj_t *ray : screensaver_weather_sun_rays) {
         if (ray) {
-            lv_obj_set_style_bg_color(ray, color, 0);
+            lv_obj_set_style_line_color(ray, color, 0);
         }
     }
     for (lv_obj_t *cloud_part : screensaver_weather_cloud_parts) {
@@ -468,6 +532,35 @@ void updateTimezoneButtonLabel()
     lv_label_set_text_fmt(ui_timezone_value_label, "%s  " LV_SYMBOL_RIGHT, selectedTimezoneLabel());
 }
 
+String weatherConfigStationUrl()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        return String();
+    }
+
+    return String("http://") + WiFi.localIP().toString() + ":8080";
+}
+
+String weatherConfigApUrl()
+{
+    const wifi_mode_t wifi_mode = WiFi.getMode();
+    const bool ap_active = (wifi_mode == WIFI_MODE_AP || wifi_mode == WIFI_MODE_APSTA);
+    if (!ap_active) {
+        return String();
+    }
+
+    return String("http://") + WiFi.softAPIP().toString() + ":8080";
+}
+
+void updateWeatherSetupButtonLabel()
+{
+    if (!ui_weather_setup_value_label) {
+        return;
+    }
+
+    lv_label_set_text(ui_weather_setup_value_label, "Weather " LV_SYMBOL_RIGHT);
+}
+
 bool extractJsonNumberField(const String &json, const char *key, float &value)
 {
     const String pattern = String("\"") + key + "\":";
@@ -497,6 +590,21 @@ bool extractJsonNumberField(const String &json, const char *key, float &value)
 
     value = json.substring(start, end).toFloat();
     return true;
+}
+
+bool parseFloatParameter(const String &text, float &value)
+{
+    String trimmed = text;
+    trimmed.trim();
+    if (trimmed.isEmpty()) {
+        return false;
+    }
+
+    trimmed.replace(',', '.');
+
+    char *parse_end = nullptr;
+    value = strtof(trimmed.c_str(), &parse_end);
+    return parse_end != trimmed.c_str() && parse_end && *parse_end == '\0';
 }
 
 void getScreensaverClockTime(int &hour, int &minute, int &second)
@@ -541,6 +649,43 @@ void updateTimezoneStatusLabel()
     lv_label_set_text(ui_timezone_status_label, status_buffer);
 }
 
+void updateWeatherSetupModalContent()
+{
+    if (!ui_weather_setup_modal_text) {
+        return;
+    }
+
+    const String station_url = weatherConfigStationUrl();
+    const String ap_url = weatherConfigApUrl();
+    const String location_label = selectedWeatherLocationLabel();
+    String body;
+    body.reserve(256);
+    body += "Set the exact weather location in your browser.\n\n";
+    body += "Current source\n";
+    body += location_label;
+    body += "\n\n";
+
+    if (station_url.length() > 0) {
+        body += "Wi-Fi\n";
+        body += station_url;
+        body += "\n\n";
+    }
+
+    if (ap_url.length() > 0) {
+        body += "AP\n";
+        body += ap_url;
+        body += "\n\n";
+    }
+
+    if (station_url.length() == 0 && ap_url.length() == 0) {
+        body += "Connect Wi-Fi or open the setup AP first.\nThen open the device IP in your browser.";
+    } else {
+        body += "Open the device IP in your browser, then choose Weather.";
+    }
+
+    lv_label_set_text(ui_weather_setup_modal_text, body.c_str());
+}
+
 WeatherGlyph glyphForWeatherCode(int code, bool)
 {
     if (code <= 1) {
@@ -556,6 +701,20 @@ WeatherGlyph glyphForWeatherCode(int code, bool)
     }
 
     return WeatherGlyph::Cloud;
+}
+
+const char *weatherGlyphLabel(WeatherGlyph glyph)
+{
+    switch (glyph) {
+    case WeatherGlyph::Sun:
+        return "Sunny";
+    case WeatherGlyph::Cloud:
+        return "Cloudy";
+    case WeatherGlyph::Rain:
+        return "Rain";
+    }
+
+    return "Weather";
 }
 
 void setScreensaverWeatherGlyph(WeatherGlyph glyph)
@@ -667,6 +826,7 @@ void openTimezoneModal()
         return;
     }
 
+    closeWeatherSetupModal();
     lv_roller_set_selected(ui_timezone_roller, static_cast<uint16_t>(timezone_index), LV_ANIM_OFF);
     lv_obj_move_foreground(ui_timezone_modal);
     lv_obj_clear_flag(ui_timezone_modal, LV_OBJ_FLAG_HIDDEN);
@@ -682,6 +842,28 @@ void closeTimezoneModal()
     lv_obj_add_flag(ui_timezone_modal, LV_OBJ_FLAG_HIDDEN);
 }
 
+void openWeatherSetupModal()
+{
+    if (!ui_weather_setup_modal) {
+        return;
+    }
+
+    closeTimezoneModal();
+    updateWeatherSetupModalContent();
+    lv_obj_move_foreground(ui_weather_setup_modal);
+    lv_obj_clear_flag(ui_weather_setup_modal, LV_OBJ_FLAG_HIDDEN);
+    lv_disp_trig_activity(nullptr);
+}
+
+void closeWeatherSetupModal()
+{
+    if (!ui_weather_setup_modal) {
+        return;
+    }
+
+    lv_obj_add_flag(ui_weather_setup_modal, LV_OBJ_FLAG_HIDDEN);
+}
+
 void ensureTimeIsConfigured()
 {
     static wl_status_t last_wifi_status = WL_DISCONNECTED;
@@ -694,6 +876,8 @@ void ensureTimeIsConfigured()
 
     last_wifi_status = wifi_status;
     updateTimezoneStatusLabel();
+    updateWeatherSetupButtonLabel();
+    updateWeatherSetupModalContent();
 }
 
 bool fetchCurrentWeather()
@@ -702,7 +886,7 @@ bool fetchCurrentWeather()
         return false;
     }
 
-    const WeatherLocation &location = selectedWeatherLocation();
+    const WeatherLocation location = selectedWeatherLocation();
     String url = "https://api.open-meteo.com/v1/forecast?latitude=";
     url += String(location.latitude, 4);
     url += "&longitude=";
@@ -787,6 +971,280 @@ void updateWeatherIfNeeded()
     fetchCurrentWeather();
 }
 
+String htmlEscape(const String &text)
+{
+    String escaped;
+    escaped.reserve(text.length() + 16);
+
+    for (size_t i = 0; i < text.length(); ++i) {
+        switch (text[i]) {
+        case '&':
+            escaped += F("&amp;");
+            break;
+        case '<':
+            escaped += F("&lt;");
+            break;
+        case '>':
+            escaped += F("&gt;");
+            break;
+        case '"':
+            escaped += F("&quot;");
+            break;
+        case '\'':
+            escaped += F("&#39;");
+            break;
+        default:
+            escaped += text[i];
+            break;
+        }
+    }
+
+    return escaped;
+}
+
+String renderWebHomePage()
+{
+    String page;
+    page.reserve(2600);
+    page += F(
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>HOMEsmthng</title>"
+        "<style>"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0c0f10;color:#f4f4f4;margin:0;padding:24px;}"
+        ".wrap{max-width:720px;margin:0 auto;}"
+        ".card{background:#171b1d;border:1px solid #2a2f33;border-radius:18px;padding:20px;margin-bottom:18px;}"
+        "h1,h2{margin:0 0 12px 0;}p{color:#c7cccf;line-height:1.45;}"
+        ".nav{display:flex;flex-direction:column;gap:12px;}"
+        ".nav a{display:flex;justify-content:space-between;align-items:center;text-decoration:none;color:#fff;"
+        "background:#111517;border:1px solid #2a2f33;border-radius:14px;padding:16px 18px;font-size:17px;font-weight:600;}"
+        ".nav span:last-child{color:#68724D;}"
+        ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:#c7cccf;}"
+        "</style></head><body><div class=\"wrap\">"
+        "<div class=\"card\"><h1>HOMEsmthng</h1>"
+        "<p>Choose a section to configure on the device.</p></div>"
+        "<div class=\"card\"><h2>Navigation</h2><div class=\"nav\">"
+        "<a href=\"/weather\"><span>Weather</span><span>&rsaquo;</span></a>"
+        "</div></div>"
+        "<div class=\"card\"><p class=\"mono\">Open this page by entering the device IP in your browser.</p></div>"
+        "</div></body></html>");
+    return page;
+}
+
+String renderWeatherConfigPage(const String &message)
+{
+    const WeatherLocation current_location = selectedWeatherLocation();
+    const String current_label = selectedWeatherLocationLabel();
+    String custom_name = weather_location_name;
+    if (custom_name.isEmpty()) {
+        custom_name = hasCustomWeatherLocation() ? String("Custom location") : current_label;
+    }
+    const String escaped_label = htmlEscape(current_label);
+    const String escaped_name = htmlEscape(custom_name);
+    const String escaped_message = htmlEscape(message);
+
+    String weather_status = "Waiting for weather data";
+    if (weather_has_data) {
+        weather_status = String(weather_temperature_c) + "&deg;C &middot; " + weatherGlyphLabel(glyphForWeatherCode(weather_code, weather_is_day));
+    } else if (WiFi.status() != WL_CONNECTED) {
+        weather_status = "Weather fetch needs Wi-Fi";
+    }
+
+    String page;
+    page.reserve(5000);
+    page += F(
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>HOMEsmthng Weather</title>"
+        "<style>"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0c0f10;color:#f4f4f4;margin:0;padding:24px;}"
+        ".wrap{max-width:720px;margin:0 auto;}"
+        ".card{background:#171b1d;border:1px solid #2a2f33;border-radius:18px;padding:20px;margin-bottom:18px;}"
+        "h1,h2{margin:0 0 12px 0;}p{color:#c7cccf;line-height:1.45;}"
+        "label{display:block;margin:14px 0 6px 0;font-weight:600;}"
+        "input{width:100%;box-sizing:border-box;border-radius:12px;border:1px solid #30363b;background:#0f1315;color:#fff;padding:14px;font-size:16px;}"
+        ".row{display:flex;gap:12px;flex-wrap:wrap;}.row > div{flex:1 1 220px;}"
+        ".actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px;}"
+        "button{border:0;border-radius:999px;padding:12px 18px;font-size:15px;font-weight:600;cursor:pointer;}"
+        ".primary{background:#68724D;color:#fff;}.secondary{background:#273038;color:#fff;}.danger{background:#3a2020;color:#fff;}"
+        ".msg{margin-bottom:16px;padding:12px 14px;border-radius:12px;background:#1f2d24;color:#d7f2df;}"
+        ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:#c7cccf;}"
+        ".toplink{display:inline-block;margin-bottom:14px;color:#c7cccf;text-decoration:none;}"
+        "</style></head><body><div class=\"wrap\">"
+        "<a class=\"toplink\" href=\"/\">&lsaquo; Home</a>"
+        "<div class=\"card\"><h1>Weather Location</h1>"
+        "<p>Set the exact location used for the clock weather monogram. Timezone stays separate and still controls the clock time.</p>");
+
+    if (message.length() > 0) {
+        page += "<div class=\"msg\">" + escaped_message + "</div>";
+    }
+
+    page += "<p><strong>Current source:</strong> " + escaped_label + "<br>";
+    page += "<strong>Coordinates:</strong> <span class=\"mono\">" + String(current_location.latitude, 6) + ", " + String(current_location.longitude, 6) + "</span><br>";
+    page += "<strong>Current weather:</strong> " + weather_status + "</p></div>";
+
+    page += F("<div class=\"card\"><h2>Custom Location</h2>"
+              "<form method=\"POST\" action=\"/weather/save\">"
+              "<label for=\"name\">Location name</label>");
+    page += "<input id=\"name\" name=\"name\" value=\"" + escaped_name + "\" placeholder=\"e.g. Munich Home\">";
+    page += F("<div class=\"row\"><div><label for=\"latitude\">Latitude</label>");
+    page += "<input id=\"latitude\" name=\"latitude\" value=\"" + String(hasCustomWeatherLocation() ? weather_custom_latitude : current_location.latitude, 6) + "\" inputmode=\"decimal\">";
+    page += F("</div><div><label for=\"longitude\">Longitude</label>");
+    page += "<input id=\"longitude\" name=\"longitude\" value=\"" + String(hasCustomWeatherLocation() ? weather_custom_longitude : current_location.longitude, 6) + "\" inputmode=\"decimal\">";
+    page += F("</div></div><div class=\"actions\">"
+              "<button class=\"primary\" type=\"submit\">Save location</button>"
+              "<button class=\"secondary\" type=\"button\" onclick=\"useBrowserLocation()\">Use current browser location</button>"
+              "</div></form>");
+
+    page += F("<form method=\"POST\" action=\"/weather/reset\" class=\"actions\">"
+              "<button class=\"danger\" type=\"submit\">Use timezone city instead</button>"
+              "</form></div>");
+
+    page += F("<div class=\"card\"><h2>How it works</h2>"
+              "<p>The weather API uses the saved coordinates. If no custom location is set, the firmware falls back to the currently selected timezone city.</p>"
+              "<p class=\"mono\">Open the device IP in your browser, then choose Weather.</p></div>");
+
+    page += F("<script>"
+              "function useBrowserLocation(){"
+              "if(!navigator.geolocation){alert('Geolocation is not supported by this browser.');return;}"
+              "navigator.geolocation.getCurrentPosition(function(pos){"
+              "document.getElementById('latitude').value=pos.coords.latitude.toFixed(6);"
+              "document.getElementById('longitude').value=pos.coords.longitude.toFixed(6);"
+              "const name=document.getElementById('name');"
+              "if(!name.value){name.value='Browser location';}"
+              "},function(err){alert('Unable to read your location: '+err.message);},{enableHighAccuracy:true,timeout:10000,maximumAge:60000});"
+              "}"
+              "</script></div></body></html>");
+
+    return page;
+}
+
+void handleWebHome()
+{
+    weather_config_server.send(200, "text/html; charset=utf-8", renderWebHomePage());
+}
+
+void handleWeatherConfigRoot()
+{
+    weather_config_server.send(200, "text/html; charset=utf-8", renderWeatherConfigPage());
+}
+
+void handleWeatherConfigSave()
+{
+    float latitude = 0.0f;
+    float longitude = 0.0f;
+    const String latitude_arg = weather_config_server.arg("latitude");
+    const String longitude_arg = weather_config_server.arg("longitude");
+
+    if (!parseFloatParameter(latitude_arg, latitude) || !parseFloatParameter(longitude_arg, longitude) ||
+        !isValidWeatherCoordinates(latitude, longitude)) {
+        weather_config_server.send(400, "text/html; charset=utf-8", renderWeatherConfigPage("Please enter valid latitude and longitude values."));
+        return;
+    }
+
+    String location_name = weather_config_server.arg("name");
+    location_name.trim();
+    if (location_name.isEmpty()) {
+        location_name = "Custom location";
+    }
+
+    weather_use_custom_location = true;
+    weather_location_name = location_name;
+    weather_custom_latitude = latitude;
+    weather_custom_longitude = longitude;
+    weather_has_data = false;
+    weather_refresh_pending = true;
+    weather_last_request_ms = 0;
+    updateWeatherMonogram();
+    saveSettingsToNVS();
+    fetchCurrentWeather();
+
+    weather_config_server.send(200, "text/html; charset=utf-8", renderWeatherConfigPage("Custom weather location saved."));
+}
+
+void handleWeatherConfigReset()
+{
+    weather_use_custom_location = false;
+    weather_location_name = "";
+    weather_custom_latitude = 0.0f;
+    weather_custom_longitude = 0.0f;
+    weather_has_data = false;
+    weather_refresh_pending = true;
+    weather_last_request_ms = 0;
+    updateWeatherMonogram();
+    saveSettingsToNVS();
+    fetchCurrentWeather();
+
+    weather_config_server.send(200, "text/html; charset=utf-8", renderWeatherConfigPage("Weather location reset to timezone city."));
+}
+
+void startWeatherConfigServer()
+{
+    if (weather_config_server_routes_registered) {
+        return;
+    }
+
+    weather_config_server.on("/", HTTP_GET, handleWebHome);
+    weather_config_server.on("/weather", HTTP_GET, handleWeatherConfigRoot);
+    weather_config_server.on("/weather/save", HTTP_POST, handleWeatherConfigSave);
+    weather_config_server.on("/weather/reset", HTTP_POST, handleWeatherConfigReset);
+    weather_config_server_routes_registered = true;
+}
+
+void ensureWeatherConfigServer()
+{
+    if (weather_config_server_running || !weather_config_server_routes_registered) {
+        return;
+    }
+
+    bool can_start = false;
+
+    if (WiFi.status() == WL_CONNECTED) {
+        const IPAddress station_ip = WiFi.localIP();
+        can_start = station_ip[0] != 0 || station_ip[1] != 0 || station_ip[2] != 0 || station_ip[3] != 0;
+    }
+
+    if (!can_start) {
+        const wifi_mode_t wifi_mode = WiFi.getMode();
+        const bool ap_active = (wifi_mode == WIFI_MODE_AP || wifi_mode == WIFI_MODE_APSTA);
+        if (ap_active) {
+            const IPAddress ap_ip = WiFi.softAPIP();
+            can_start = ap_ip[0] != 0 || ap_ip[1] != 0 || ap_ip[2] != 0 || ap_ip[3] != 0;
+        }
+    }
+
+    if (!can_start) {
+        return;
+    }
+
+    weather_config_server.begin();
+    weather_config_server_running = true;
+    Serial.println("Weather config server started");
+}
+
+void logWeatherConfigUrls()
+{
+    static String last_station_url;
+    static String last_ap_url;
+
+    const String station_url = weatherConfigStationUrl();
+    const String ap_url = weatherConfigApUrl();
+
+    if (station_url != last_station_url) {
+        last_station_url = station_url;
+        if (station_url.length() > 0) {
+            Serial.printf("Weather config UI (Wi-Fi): %s\n", station_url.c_str());
+        }
+    }
+
+    if (ap_url != last_ap_url) {
+        last_ap_url = ap_url;
+        if (ap_url.length() > 0) {
+            Serial.printf("Weather config UI (AP): %s\n", ap_url.c_str());
+        }
+    }
+}
+
 void setClockHandPoints(lv_point_t points[2], float angle_deg, lv_coord_t cx, lv_coord_t cy, lv_coord_t length, lv_coord_t tail)
 {
     const float angle_rad = angle_deg * static_cast<float>(PI) / 180.0f;
@@ -848,6 +1306,7 @@ void showScreensaver()
     }
 
     closeTimezoneModal();
+    closeWeatherSetupModal();
 
     if (screen2_timer) {
         lv_timer_del(screen2_timer);
@@ -983,6 +1442,9 @@ void updateWiFiSymbol()
             switches_hidden = false;
         }
     }
+
+    updateWeatherSetupButtonLabel();
+    updateWeatherSetupModalContent();
 }
 
 void updateLVGLState(uint8_t id, bool state)
@@ -1033,6 +1495,12 @@ void applyNewColor(lv_color_t new_color)
     if (ui_timezone_done_button) {
         lv_obj_set_style_bg_color(ui_timezone_done_button, active_switch_color, 0);
     }
+    if (ui_weather_setup_value_label) {
+        lv_obj_set_style_text_color(ui_weather_setup_value_label, active_switch_color, 0);
+    }
+    if (ui_weather_setup_done_button) {
+        lv_obj_set_style_bg_color(ui_weather_setup_done_button, active_switch_color, 0);
+    }
 
     applyClockAccentColor(active_switch_color);
 }
@@ -1045,6 +1513,10 @@ void saveSettingsToNVS()
     preferences.putBool("px_shift", oled_pixel_shift_enabled);
     preferences.putBool("clock_sv", oled_clock_saver_enabled);
     preferences.putInt("tz_idx", timezone_index);
+    preferences.putBool("wx_custom", weather_use_custom_location);
+    preferences.putString("wx_name", weather_location_name);
+    preferences.putFloat("wx_lat", weather_custom_latitude);
+    preferences.putFloat("wx_lon", weather_custom_longitude);
     preferences.end();
 }
 
@@ -1058,6 +1530,10 @@ void loadSettingsFromNVS()
     oled_clock_saver_enabled =
         preferences.getBool("clock_sv", boardProfile().display_backend != DisplayBackendKind::TrgbPanel && supportsClockSaver());
     timezone_index = preferences.getInt("tz_idx", kDefaultTimezoneIndex);
+    weather_use_custom_location = preferences.getBool("wx_custom", false);
+    weather_location_name = preferences.getString("wx_name", "");
+    weather_custom_latitude = preferences.getFloat("wx_lat", 0.0f);
+    weather_custom_longitude = preferences.getFloat("wx_lon", 0.0f);
     preferences.end();
 
     if (timezone_index < 0 || timezone_index >= kNumTimezones) {
@@ -1070,6 +1546,10 @@ void loadSettingsFromNVS()
     }
     if (!supportsClockSaver()) {
         oled_clock_saver_enabled = false;
+    }
+    if (!hasCustomWeatherLocation()) {
+        weather_use_custom_location = false;
+        weather_location_name = "";
     }
 
     active_switch_color = lv_color_hex(active_switch_color_hex);
@@ -1206,6 +1686,24 @@ void timezone_done_event_handler(lv_event_t *e)
 
     saveSettingsToNVS();
     closeTimezoneModal();
+}
+
+void weather_setup_button_event_handler(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    openWeatherSetupModal();
+}
+
+void weather_setup_done_event_handler(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    closeWeatherSetupModal();
 }
 
 void screensaver_overlay_event_handler(lv_event_t *e)
@@ -1502,7 +2000,7 @@ void setupUI()
     lv_obj_set_style_text_color(lbl_swipe_hint_sett, lv_color_make(180, 180, 180), 0);
 
     lv_obj_t *lbl_care_title = lv_label_create(tileDisplayCare);
-    lv_label_set_text(lbl_care_title, "Display Care");
+    lv_label_set_text(lbl_care_title, "Display");
     lv_obj_align(lbl_care_title, LV_ALIGN_TOP_MID, 0, scaleUi(20));
     lv_obj_set_style_text_font(lbl_care_title, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_care_title, lv_color_white(), 0);
@@ -1587,6 +2085,23 @@ void setupUI()
     lv_obj_set_style_text_align(ui_timezone_status_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(ui_timezone_status_label, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(ui_timezone_status_label, lv_color_make(190, 190, 190), 0);
+
+    ui_weather_setup_button = lv_obj_create(tileDisplayCare);
+    lv_obj_remove_style_all(ui_weather_setup_button);
+    lv_obj_set_size(ui_weather_setup_button, compact_width, compact_row_height);
+    lv_obj_align_to(ui_weather_setup_button, ui_timezone_status_label, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(18));
+    lv_obj_set_style_pad_gap(ui_weather_setup_button, scaleUi(10), 0);
+    hideScrollbarVisuals(ui_weather_setup_button);
+    lv_obj_add_flag(ui_weather_setup_button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(ui_weather_setup_button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(ui_weather_setup_button, weather_setup_button_event_handler, LV_EVENT_CLICKED, nullptr);
+
+    ui_weather_setup_value_label = lv_label_create(ui_weather_setup_button);
+    lv_obj_set_width(ui_weather_setup_value_label, compact_width);
+    lv_obj_center(ui_weather_setup_value_label);
+    lv_obj_set_style_text_align(ui_weather_setup_value_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(ui_weather_setup_value_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(ui_weather_setup_value_label, active_switch_color, 0);
 
     lv_obj_t *lbl_swipe_hint_left = lv_label_create(tileDisplayCare);
     lv_label_set_text(lbl_swipe_hint_left, LV_SYMBOL_LEFT);
@@ -1700,6 +2215,53 @@ void setupUI()
 
     updateTimezoneButtonLabel();
     updateTimezoneStatusLabel();
+    updateWeatherSetupButtonLabel();
+
+    ui_weather_setup_modal = lv_obj_create(scr);
+    lv_obj_remove_style_all(ui_weather_setup_modal);
+    lv_obj_set_size(ui_weather_setup_modal, metrics.display_width, metrics.display_height);
+    lv_obj_set_style_bg_color(ui_weather_setup_modal, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(ui_weather_setup_modal, LV_OPA_90, 0);
+    hideScrollbarVisuals(ui_weather_setup_modal);
+    lv_obj_add_flag(ui_weather_setup_modal, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_weather_setup_modal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(ui_weather_setup_modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *weather_setup_modal_panel = lv_obj_create(ui_weather_setup_modal);
+    lv_obj_remove_style_all(weather_setup_modal_panel);
+    lv_obj_set_size(weather_setup_modal_panel, compact_width, full_size - scaleUi(110));
+    lv_obj_center(weather_setup_modal_panel);
+    hideScrollbarVisuals(weather_setup_modal_panel);
+    lv_obj_clear_flag(weather_setup_modal_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *weather_setup_modal_title = lv_label_create(weather_setup_modal_panel);
+    lv_label_set_text(weather_setup_modal_title, "Weather");
+    lv_obj_align(weather_setup_modal_title, LV_ALIGN_TOP_MID, 0, scaleUi(6));
+    lv_obj_set_style_text_font(weather_setup_modal_title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(weather_setup_modal_title, lv_color_white(), 0);
+
+    ui_weather_setup_modal_text = lv_label_create(weather_setup_modal_panel);
+    lv_obj_set_width(ui_weather_setup_modal_text, compact_width - scaleUi(20));
+    lv_label_set_long_mode(ui_weather_setup_modal_text, LV_LABEL_LONG_WRAP);
+    lv_obj_align(ui_weather_setup_modal_text, LV_ALIGN_TOP_MID, 0, scaleUi(54));
+    lv_obj_set_style_text_align(ui_weather_setup_modal_text, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(ui_weather_setup_modal_text, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(ui_weather_setup_modal_text, lv_color_white(), 0);
+
+    ui_weather_setup_done_button = lv_btn_create(weather_setup_modal_panel);
+    lv_obj_set_size(ui_weather_setup_done_button, scaleUi(150), scaleUi(46));
+    lv_obj_align(ui_weather_setup_done_button, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(12));
+    lv_obj_set_style_radius(ui_weather_setup_done_button, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(ui_weather_setup_done_button, 0, 0);
+    lv_obj_set_style_bg_color(ui_weather_setup_done_button, active_switch_color, 0);
+    lv_obj_add_event_cb(ui_weather_setup_done_button, weather_setup_done_event_handler, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *weather_setup_done_label = lv_label_create(ui_weather_setup_done_button);
+    lv_label_set_text(weather_setup_done_label, "Done");
+    lv_obj_center(weather_setup_done_label);
+    lv_obj_set_style_text_color(weather_setup_done_label, lv_color_white(), 0);
+
+    updateWeatherSetupModalContent();
 
     screensaver_overlay = lv_obj_create(scr);
     lv_obj_remove_style_all(screensaver_overlay);
@@ -1802,19 +2364,28 @@ void setupUI()
     lv_obj_set_style_radius(screensaver_weather_sun_core, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(screensaver_weather_sun_core, LV_OPA_COVER, 0);
 
-    const lv_coord_t ray_lengths[4][4] = {
-        {scaleUi(20), 0, scaleUi(2), scaleUi(8)},
-        {scaleUi(20), scaleUi(34), scaleUi(2), scaleUi(8)},
-        {0, scaleUi(20), scaleUi(8), scaleUi(2)},
-        {scaleUi(34), scaleUi(20), scaleUi(8), scaleUi(2)},
-    };
-    for (int i = 0; i < 4; ++i) {
-        screensaver_weather_sun_rays[i] = lv_obj_create(screensaver_weather_icon);
-        lv_obj_remove_style_all(screensaver_weather_sun_rays[i]);
-        lv_obj_set_size(screensaver_weather_sun_rays[i], ray_lengths[i][2], ray_lengths[i][3]);
-        lv_obj_set_pos(screensaver_weather_sun_rays[i], ray_lengths[i][0], ray_lengths[i][1]);
-        lv_obj_set_style_radius(screensaver_weather_sun_rays[i], LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_opa(screensaver_weather_sun_rays[i], LV_OPA_COVER, 0);
+    const lv_coord_t sun_center = scaleUi(21);
+    const float sun_inner_radius = static_cast<float>(scaleUi(12));
+    const float sun_outer_radius = static_cast<float>(scaleUi(18));
+    for (int i = 0; i < 8; ++i) {
+        const float angle_deg = -90.0f + static_cast<float>(i * 45);
+        const float angle_rad = angle_deg * static_cast<float>(PI) / 180.0f;
+        const float cos_value = cosf(angle_rad);
+        const float sin_value = sinf(angle_rad);
+
+        screensaver_weather_sun_ray_points[i][0] = {
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(sun_center) + (cos_value * sun_inner_radius))),
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(sun_center) + (sin_value * sun_inner_radius)))};
+        screensaver_weather_sun_ray_points[i][1] = {
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(sun_center) + (cos_value * sun_outer_radius))),
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(sun_center) + (sin_value * sun_outer_radius)))};
+        screensaver_weather_sun_rays[i] = lv_line_create(screensaver_weather_icon);
+        lv_line_set_points(screensaver_weather_sun_rays[i], screensaver_weather_sun_ray_points[i], 2);
+        lv_obj_set_style_line_width(screensaver_weather_sun_rays[i], scaleUi(2), 0);
+        lv_obj_set_style_line_rounded(screensaver_weather_sun_rays[i], true, 0);
+        lv_obj_set_style_line_opa(screensaver_weather_sun_rays[i], LV_OPA_COVER, 0);
+        lv_obj_clear_flag(screensaver_weather_sun_rays[i], LV_OBJ_FLAG_SCROLLABLE);
+        hideScrollbarVisuals(screensaver_weather_sun_rays[i]);
     }
 
     const lv_coord_t cloud_rects[4][4] = {
@@ -1890,6 +2461,8 @@ void setup()
     homeSpan.setApSSID("HOMEsmthng");
     homeSpan.setApPassword("");
     homeSpan.enableAutoStartAP();
+    startWeatherConfigServer();
+    ensureWeatherConfigServer();
 
     new SpanAccessory();
     new Service::AccessoryInformation();
@@ -1915,12 +2488,17 @@ void setup()
     updateTimezoneStatusLabel();
     applyPixelShiftOffset(0, 0);
     safeSetBrightness(global_brightness);
+    logWeatherConfigUrls();
 }
 
 void loop()
 {
     lv_timer_handler();
     homeSpan.poll();
+    ensureWeatherConfigServer();
+    if (weather_config_server_running) {
+        weather_config_server.handleClient();
+    }
 
     static unsigned long lastUpdate = 0;
     if (millis() - lastUpdate > 1000) {
@@ -1928,6 +2506,7 @@ void loop()
         updateWiFiSymbol();
         ensureTimeIsConfigured();
         updateWeatherIfNeeded();
+        logWeatherConfigUrls();
     }
 
     updateOledProtection();
