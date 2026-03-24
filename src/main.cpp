@@ -5,9 +5,11 @@
  */
 
 #include <Arduino.h>
+#include <HTTPClient.h>
 #include <HomeSpan.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <lvgl.h>
 
 #include <math.h>
@@ -26,6 +28,8 @@ constexpr int kTimezoneVisibleRows = 5;
 constexpr uint32_t kClockSaverIdleMs = 45000;
 constexpr uint32_t kClockWakeDetectMs = 250;
 constexpr uint32_t kPixelShiftIntervalMs = 30000;
+constexpr uint32_t kWeatherRefreshMs = 15UL * 60UL * 1000UL;
+constexpr uint32_t kWeatherRetryMs = 60UL * 1000UL;
 constexpr int kPixelShiftAmplitude = 2;
 constexpr time_t kValidClockEpoch = 1704067200; // 2024-01-01 00:00:00 UTC
 constexpr int kDefaultTimezoneIndex = 1;
@@ -76,6 +80,29 @@ constexpr char kTimezoneDropdownOptions[] =
     "Los Angeles\n"
     "Tokyo\n"
     "Sydney";
+
+struct WeatherLocation {
+    float latitude;
+    float longitude;
+};
+
+enum class WeatherGlyph {
+    Sun,
+    Cloud,
+    Rain,
+};
+
+const WeatherLocation kWeatherLocations[kNumTimezones] = {
+    {51.4779f, 0.0015f},
+    {52.5200f, 13.4050f},
+    {51.5072f, -0.1276f},
+    {40.7128f, -74.0060f},
+    {41.8781f, -87.6298f},
+    {39.7392f, -104.9903f},
+    {34.0522f, -118.2437f},
+    {35.6762f, 139.6503f},
+    {-33.8688f, 151.2093f},
+};
 
 DisplayBackend &displayBackend()
 {
@@ -138,6 +165,13 @@ lv_obj_t *screensaver_hour_hand = nullptr;
 lv_obj_t *screensaver_minute_hand = nullptr;
 lv_obj_t *screensaver_second_hand = nullptr;
 lv_obj_t *screensaver_center_dot = nullptr;
+lv_obj_t *screensaver_weather_group = nullptr;
+lv_obj_t *screensaver_weather_icon = nullptr;
+lv_obj_t *screensaver_weather_temp_label = nullptr;
+lv_obj_t *screensaver_weather_sun_core = nullptr;
+lv_obj_t *screensaver_weather_sun_rays[4] = {};
+lv_obj_t *screensaver_weather_cloud_parts[4] = {};
+lv_obj_t *screensaver_weather_rain_lines[3] = {};
 
 lv_point_t screensaver_hour_points[2] = {};
 lv_point_t screensaver_minute_points[2] = {};
@@ -155,6 +189,14 @@ int pixel_shift_x = 0;
 int pixel_shift_y = 0;
 int timezone_index = kDefaultTimezoneIndex;
 bool timezone_sync_pending = true;
+bool weather_has_data = false;
+bool weather_refresh_pending = true;
+int weather_temperature_c = 0;
+int weather_code = 0;
+bool weather_is_day = true;
+unsigned long weather_last_request_ms = 0;
+unsigned long weather_last_success_ms = 0;
+WeatherGlyph weather_glyph = WeatherGlyph::Cloud;
 
 uint32_t active_switch_color_hex = 0x68724D;
 lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
@@ -175,9 +217,16 @@ bool isPixelShiftEnabled();
 bool isClockSaverEnabled();
 int screensaverBrightness();
 int pixelShiftSafeCropInset();
+const WeatherLocation &selectedWeatherLocation();
 void syncScreen2IdleTimer();
 void applyPixelShiftOffset(int shift_x, int shift_y);
 void updateScreensaverClock(bool force);
+void updateWeatherMonogram();
+bool extractJsonNumberField(const String &json, const char *key, float &value);
+WeatherGlyph glyphForWeatherCode(int code, bool is_day);
+void setScreensaverWeatherGlyph(WeatherGlyph glyph);
+bool fetchCurrentWeather();
+void updateWeatherIfNeeded();
 void hideScreensaver(bool user_wake);
 void updateOledProtection();
 void applyTimezoneSetting(bool request_sync);
@@ -275,6 +324,14 @@ const char *selectedTimezoneRule()
     return kTimezoneRules[timezone_index];
 }
 
+const WeatherLocation &selectedWeatherLocation()
+{
+    if (timezone_index < 0 || timezone_index >= kNumTimezones) {
+        timezone_index = kDefaultTimezoneIndex;
+    }
+    return kWeatherLocations[timezone_index];
+}
+
 void applyClockAccentColor(lv_color_t color)
 {
     if (screensaver_hour_hand) {
@@ -288,6 +345,24 @@ void applyClockAccentColor(lv_color_t color)
     }
     if (screensaver_center_dot) {
         lv_obj_set_style_bg_color(screensaver_center_dot, color, 0);
+    }
+    if (screensaver_weather_sun_core) {
+        lv_obj_set_style_bg_color(screensaver_weather_sun_core, color, 0);
+    }
+    for (lv_obj_t *ray : screensaver_weather_sun_rays) {
+        if (ray) {
+            lv_obj_set_style_bg_color(ray, color, 0);
+        }
+    }
+    for (lv_obj_t *cloud_part : screensaver_weather_cloud_parts) {
+        if (cloud_part) {
+            lv_obj_set_style_bg_color(cloud_part, color, 0);
+        }
+    }
+    for (lv_obj_t *rain_line : screensaver_weather_rain_lines) {
+        if (rain_line) {
+            lv_obj_set_style_bg_color(rain_line, color, 0);
+        }
     }
 }
 
@@ -393,6 +468,37 @@ void updateTimezoneButtonLabel()
     lv_label_set_text_fmt(ui_timezone_value_label, "%s  " LV_SYMBOL_RIGHT, selectedTimezoneLabel());
 }
 
+bool extractJsonNumberField(const String &json, const char *key, float &value)
+{
+    const String pattern = String("\"") + key + "\":";
+    int start = json.indexOf(pattern);
+    if (start < 0) {
+        return false;
+    }
+
+    start += pattern.length();
+    while (start < json.length() && (json[start] == ' ' || json[start] == '\t')) {
+        ++start;
+    }
+
+    int end = start;
+    while (end < json.length()) {
+        const char c = json[end];
+        if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.') {
+            ++end;
+            continue;
+        }
+        break;
+    }
+
+    if (end == start) {
+        return false;
+    }
+
+    value = json.substring(start, end).toFloat();
+    return true;
+}
+
 void getScreensaverClockTime(int &hour, int &minute, int &second)
 {
     const time_t now = time(nullptr);
@@ -435,12 +541,113 @@ void updateTimezoneStatusLabel()
     lv_label_set_text(ui_timezone_status_label, status_buffer);
 }
 
+WeatherGlyph glyphForWeatherCode(int code, bool)
+{
+    if (code <= 1) {
+        return WeatherGlyph::Sun;
+    }
+
+    if (code == 2 || code == 3 || code == 45 || code == 48) {
+        return WeatherGlyph::Cloud;
+    }
+
+    if ((code >= 51 && code <= 67) || (code >= 71 && code <= 77) || (code >= 80 && code <= 99)) {
+        return WeatherGlyph::Rain;
+    }
+
+    return WeatherGlyph::Cloud;
+}
+
+void setScreensaverWeatherGlyph(WeatherGlyph glyph)
+{
+    weather_glyph = glyph;
+
+    const bool show_sun = (glyph == WeatherGlyph::Sun);
+    const bool show_cloud = (glyph == WeatherGlyph::Cloud || glyph == WeatherGlyph::Rain);
+    const bool show_rain = (glyph == WeatherGlyph::Rain);
+
+    if (screensaver_weather_sun_core) {
+        if (show_sun) {
+            lv_obj_clear_flag(screensaver_weather_sun_core, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(screensaver_weather_sun_core, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    for (lv_obj_t *ray : screensaver_weather_sun_rays) {
+        if (!ray) {
+            continue;
+        }
+        if (show_sun) {
+            lv_obj_clear_flag(ray, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(ray, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    for (lv_obj_t *cloud_part : screensaver_weather_cloud_parts) {
+        if (!cloud_part) {
+            continue;
+        }
+        if (show_cloud) {
+            lv_obj_clear_flag(cloud_part, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(cloud_part, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    for (lv_obj_t *rain_line : screensaver_weather_rain_lines) {
+        if (!rain_line) {
+            continue;
+        }
+        if (show_rain) {
+            lv_obj_clear_flag(rain_line, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(rain_line, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+void updateWeatherMonogram()
+{
+    if (!screensaver_weather_group || !screensaver_weather_temp_label) {
+        return;
+    }
+
+    if (!weather_has_data) {
+        lv_obj_add_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    setScreensaverWeatherGlyph(glyphForWeatherCode(weather_code, weather_is_day));
+    lv_label_set_text_fmt(screensaver_weather_temp_label, "%d°", weather_temperature_c);
+
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    getScreensaverClockTime(hour, minute, second);
+
+    const float hour_angle = ((hour % 12) + (minute / 60.0f)) * 30.0f - 90.0f;
+    const float hour_angle_rad = hour_angle * static_cast<float>(PI) / 180.0f;
+    const bool hour_hand_in_top_half = sinf(hour_angle_rad) < 0.0f;
+    const lv_coord_t radial_midpoint_offset = lv_obj_get_height(screensaver_clock_face) / 4;
+
+    lv_obj_clear_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(
+        screensaver_weather_group,
+        LV_ALIGN_CENTER,
+        0,
+        hour_hand_in_top_half ? radial_midpoint_offset : -radial_midpoint_offset);
+}
+
 void applyTimezoneSetting(bool request_sync)
 {
     setenv("TZ", selectedTimezoneRule(), 1);
     tzset();
 
     updateTimezoneButtonLabel();
+    weather_refresh_pending = true;
+    weather_last_request_ms = 0;
 
     if (request_sync) {
         timezone_sync_pending = true;
@@ -487,6 +694,97 @@ void ensureTimeIsConfigured()
 
     last_wifi_status = wifi_status;
     updateTimezoneStatusLabel();
+}
+
+bool fetchCurrentWeather()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        return false;
+    }
+
+    const WeatherLocation &location = selectedWeatherLocation();
+    String url = "https://api.open-meteo.com/v1/forecast?latitude=";
+    url += String(location.latitude, 4);
+    url += "&longitude=";
+    url += String(location.longitude, 4);
+    url += "&current=temperature_2m,weather_code,is_day&temperature_unit=celsius&forecast_days=1";
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient http;
+    http.setTimeout(4000);
+    if (!http.begin(client, url)) {
+        return false;
+    }
+
+    const int status = http.GET();
+    if (status != HTTP_CODE_OK) {
+        http.end();
+        return false;
+    }
+
+    const String payload = http.getString();
+    http.end();
+
+    const int current_index = payload.indexOf("\"current\":");
+    if (current_index < 0) {
+        return false;
+    }
+
+    const int object_start = payload.indexOf('{', current_index);
+    const int object_end = payload.indexOf('}', object_start);
+    if (object_start < 0 || object_end < 0 || object_end <= object_start) {
+        return false;
+    }
+
+    const String current_json = payload.substring(object_start, object_end + 1);
+
+    float temperature = 0.0f;
+    float code_value = 0.0f;
+    float day_value = 1.0f;
+    if (!extractJsonNumberField(current_json, "temperature_2m", temperature) ||
+        !extractJsonNumberField(current_json, "weather_code", code_value) ||
+        !extractJsonNumberField(current_json, "is_day", day_value)) {
+        return false;
+    }
+
+    weather_temperature_c = (temperature >= 0.0f) ? static_cast<int>(temperature + 0.5f) : static_cast<int>(temperature - 0.5f);
+    weather_code = static_cast<int>(code_value + 0.5f);
+    weather_is_day = (day_value >= 0.5f);
+    weather_has_data = true;
+    weather_last_success_ms = millis();
+    weather_refresh_pending = false;
+    updateWeatherMonogram();
+    return true;
+}
+
+void updateWeatherIfNeeded()
+{
+    static wl_status_t last_wifi_status = WL_DISCONNECTED;
+    const wl_status_t wifi_status = WiFi.status();
+
+    if (wifi_status != WL_CONNECTED) {
+        last_wifi_status = wifi_status;
+        return;
+    }
+
+    if (last_wifi_status != WL_CONNECTED) {
+        weather_refresh_pending = true;
+        weather_last_request_ms = 0;
+    }
+    last_wifi_status = wifi_status;
+
+    const unsigned long now = millis();
+    const bool weather_stale = (weather_last_success_ms == 0) || (now - weather_last_success_ms >= kWeatherRefreshMs);
+    const bool retry_due = (weather_last_request_ms == 0) || (now - weather_last_request_ms >= kWeatherRetryMs);
+
+    if (!(weather_refresh_pending || weather_stale) || !retry_due) {
+        return;
+    }
+
+    weather_last_request_ms = now;
+    fetchCurrentWeather();
 }
 
 void setClockHandPoints(lv_point_t points[2], float angle_deg, lv_coord_t cx, lv_coord_t cy, lv_coord_t length, lv_coord_t tail)
@@ -540,6 +838,7 @@ void updateScreensaverClock(bool force)
     lv_line_set_points(screensaver_hour_hand, screensaver_hour_points, 2);
     lv_line_set_points(screensaver_minute_hand, screensaver_minute_points, 2);
     lv_line_set_points(screensaver_second_hand, screensaver_second_points, 2);
+    updateWeatherMonogram();
 }
 
 void showScreensaver()
@@ -1473,7 +1772,91 @@ void setupUI()
     lv_obj_set_style_radius(screensaver_center_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(screensaver_center_dot, LV_OPA_90, 0);
 
+    screensaver_weather_group = lv_obj_create(screensaver_clock_face);
+    lv_obj_remove_style_all(screensaver_weather_group);
+    lv_obj_set_size(screensaver_weather_group, scaleUi(156), scaleUi(58));
+    lv_obj_set_style_bg_opa(screensaver_weather_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_layout(screensaver_weather_group, LV_LAYOUT_FLEX, 0);
+    lv_obj_set_flex_flow(screensaver_weather_group, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(
+        screensaver_weather_group,
+        LV_FLEX_ALIGN_CENTER,
+        LV_FLEX_ALIGN_CENTER,
+        LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(screensaver_weather_group, 0, 0);
+    lv_obj_set_style_pad_gap(screensaver_weather_group, scaleUi(10), 0);
+    lv_obj_clear_flag(screensaver_weather_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
+    hideScrollbarVisuals(screensaver_weather_group);
+
+    screensaver_weather_icon = lv_obj_create(screensaver_weather_group);
+    lv_obj_remove_style_all(screensaver_weather_icon);
+    lv_obj_set_size(screensaver_weather_icon, scaleUi(42), scaleUi(42));
+    lv_obj_set_style_bg_opa(screensaver_weather_icon, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(screensaver_weather_icon, LV_OBJ_FLAG_SCROLLABLE);
+
+    screensaver_weather_sun_core = lv_obj_create(screensaver_weather_icon);
+    lv_obj_remove_style_all(screensaver_weather_sun_core);
+    lv_obj_set_size(screensaver_weather_sun_core, scaleUi(18), scaleUi(18));
+    lv_obj_align(screensaver_weather_sun_core, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(screensaver_weather_sun_core, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(screensaver_weather_sun_core, LV_OPA_COVER, 0);
+
+    const lv_coord_t ray_lengths[4][4] = {
+        {scaleUi(20), 0, scaleUi(2), scaleUi(8)},
+        {scaleUi(20), scaleUi(34), scaleUi(2), scaleUi(8)},
+        {0, scaleUi(20), scaleUi(8), scaleUi(2)},
+        {scaleUi(34), scaleUi(20), scaleUi(8), scaleUi(2)},
+    };
+    for (int i = 0; i < 4; ++i) {
+        screensaver_weather_sun_rays[i] = lv_obj_create(screensaver_weather_icon);
+        lv_obj_remove_style_all(screensaver_weather_sun_rays[i]);
+        lv_obj_set_size(screensaver_weather_sun_rays[i], ray_lengths[i][2], ray_lengths[i][3]);
+        lv_obj_set_pos(screensaver_weather_sun_rays[i], ray_lengths[i][0], ray_lengths[i][1]);
+        lv_obj_set_style_radius(screensaver_weather_sun_rays[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(screensaver_weather_sun_rays[i], LV_OPA_COVER, 0);
+    }
+
+    const lv_coord_t cloud_rects[4][4] = {
+        {scaleUi(3), scaleUi(14), scaleUi(15), scaleUi(15)},
+        {scaleUi(13), scaleUi(8), scaleUi(18), scaleUi(18)},
+        {scaleUi(26), scaleUi(14), scaleUi(13), scaleUi(13)},
+        {scaleUi(8), scaleUi(21), scaleUi(28), scaleUi(11)},
+    };
+    for (int i = 0; i < 4; ++i) {
+        screensaver_weather_cloud_parts[i] = lv_obj_create(screensaver_weather_icon);
+        lv_obj_remove_style_all(screensaver_weather_cloud_parts[i]);
+        lv_obj_set_size(screensaver_weather_cloud_parts[i], cloud_rects[i][2], cloud_rects[i][3]);
+        lv_obj_set_pos(screensaver_weather_cloud_parts[i], cloud_rects[i][0], cloud_rects[i][1]);
+        lv_obj_set_style_radius(
+            screensaver_weather_cloud_parts[i],
+            (i == 3) ? scaleUi(6) : LV_RADIUS_CIRCLE,
+            0);
+        lv_obj_set_style_bg_opa(screensaver_weather_cloud_parts[i], LV_OPA_COVER, 0);
+    }
+
+    const lv_coord_t rain_rects[3][4] = {
+        {scaleUi(11), scaleUi(31), scaleUi(2), scaleUi(8)},
+        {scaleUi(20), scaleUi(33), scaleUi(2), scaleUi(8)},
+        {scaleUi(29), scaleUi(31), scaleUi(2), scaleUi(8)},
+    };
+    for (int i = 0; i < 3; ++i) {
+        screensaver_weather_rain_lines[i] = lv_obj_create(screensaver_weather_icon);
+        lv_obj_remove_style_all(screensaver_weather_rain_lines[i]);
+        lv_obj_set_size(screensaver_weather_rain_lines[i], rain_rects[i][2], rain_rects[i][3]);
+        lv_obj_set_pos(screensaver_weather_rain_lines[i], rain_rects[i][0], rain_rects[i][1]);
+        lv_obj_set_style_radius(screensaver_weather_rain_lines[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(screensaver_weather_rain_lines[i], LV_OPA_COVER, 0);
+    }
+
+    screensaver_weather_temp_label = lv_label_create(screensaver_weather_group);
+    lv_label_set_text(screensaver_weather_temp_label, "--°");
+    lv_obj_set_style_text_font(screensaver_weather_temp_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(screensaver_weather_temp_label, lv_color_white(), 0);
+
     applyClockAccentColor(active_switch_color);
+    setScreensaverWeatherGlyph(weather_glyph);
+    updateWeatherMonogram();
     updateScreensaverClock(true);
     updateScrollbarModes();
 }
@@ -1544,6 +1927,7 @@ void loop()
         lastUpdate = millis();
         updateWiFiSymbol();
         ensureTimeIsConfigured();
+        updateWeatherIfNeeded();
     }
 
     updateOledProtection();
