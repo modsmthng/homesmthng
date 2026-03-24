@@ -4,6 +4,8 @@ HOMEsmthng turns supported ESP32-S3 display boards into a HomeKit smart switch d
 
 The project is built for VS Code with PlatformIO using `pioarduino`, with one shared codebase for multiple round display boards.
 
+Demo video: https://youtu.be/96I17sV4fLk?si=4SN58w6wTHuDt7Tn
+
 ## Highlights
 
 - Shared LVGL UI across all supported boards
@@ -18,6 +20,10 @@ The project is built for VS Code with PlatformIO using `pioarduino`, with one sh
 - `trgb_full_circle`: LilyGo T-RGB 2.1" Full Circle
 - `lilygo_amoled_175`: LilyGo T-Display-S3 AMOLED 1.75"
 - `waveshare_amoled_175`: Waveshare ESP32-S3 Touch AMOLED 1.75"
+
+For the original LilyGo T-RGB build, this housing was used:
+
+- Used housing: https://www.printables.com/model/1492077-minimalist-housing-with-frame-for-the-lilygo-t-rgb
 
 The UI is normalized to a shared `466x466` canvas. On the T-RGB this leaves a `7px` black border around the active UI area.
 
