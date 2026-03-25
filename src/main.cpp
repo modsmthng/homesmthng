@@ -2155,7 +2155,7 @@ void setupUI()
 
     lv_obj_t *lbl_swipe_hint_up = lv_label_create(tileCode);
     lv_label_set_text(lbl_swipe_hint_up, LV_SYMBOL_UP);
-    lv_obj_align_to(lbl_swipe_hint_up, lbl_back_to_settings, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(6));
+    lv_obj_align(lbl_swipe_hint_up, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(12));
     lv_obj_set_style_text_font(lbl_swipe_hint_up, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(lbl_swipe_hint_up, lv_color_make(180, 180, 180), 0);
 
