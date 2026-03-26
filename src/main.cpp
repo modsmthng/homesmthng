@@ -211,6 +211,8 @@ unsigned long weather_last_success_ms = 0;
 WeatherGlyph weather_glyph = WeatherGlyph::Cloud;
 bool weather_config_server_routes_registered = false;
 bool weather_config_server_running = false;
+bool homespan_setup_ap_active = false;
+bool wifi_setup_info_visible = false;
 
 uint32_t active_switch_color_hex = 0x68724D;
 lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
@@ -258,6 +260,9 @@ void startWeatherConfigServer();
 void ensureWeatherConfigServer();
 void logWeatherConfigUrls();
 void hideScreensaver(bool user_wake);
+bool isSetupAccessPointVisible();
+void setWifiSetupInfoVisible(bool visible, bool force_main_tile);
+void homeSpanStatusCallback(HS_STATUS status);
 void updateOledProtection();
 void applyTimezoneSetting(bool request_sync);
 void ensureTimeIsConfigured();
@@ -1336,6 +1341,75 @@ void hideScreensaver(bool user_wake)
     }
 }
 
+bool isSetupAccessPointVisible()
+{
+    if (homespan_setup_ap_active) {
+        return true;
+    }
+
+    const wifi_mode_t wifi_mode = WiFi.getMode();
+    const bool ap_mode_active = (wifi_mode == WIFI_MODE_AP || wifi_mode == WIFI_MODE_APSTA);
+    const IPAddress ap_ip = WiFi.softAPIP();
+    const bool ap_ip_valid = (ap_ip[0] != 0 || ap_ip[1] != 0 || ap_ip[2] != 0 || ap_ip[3] != 0);
+    return ap_mode_active || ap_ip_valid;
+}
+
+void setWifiSetupInfoVisible(bool visible, bool force_main_tile)
+{
+    if (!ui_wifi_setup_msg || !tileview) {
+        return;
+    }
+
+    if (visible && force_main_tile && tileMain) {
+        lv_obj_set_tile(tileview, tileMain, LV_ANIM_OFF);
+    }
+
+    if (visible == wifi_setup_info_visible) {
+        return;
+    }
+
+    if (visible) {
+        lv_obj_clear_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < kNumUiSwitches; ++i) {
+            if (ui_switch_buttons[i]) {
+                lv_obj_add_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    } else {
+        lv_obj_add_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < kNumUiSwitches; ++i) {
+            if (ui_switch_buttons[i]) {
+                lv_obj_clear_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+
+    wifi_setup_info_visible = visible;
+}
+
+void homeSpanStatusCallback(HS_STATUS status)
+{
+    switch (status) {
+    case HS_AP_STARTED:
+    case HS_AP_CONNECTED:
+        homespan_setup_ap_active = true;
+        setWifiSetupInfoVisible(true, true);
+        lv_timer_handler();
+        break;
+    case HS_AP_TERMINATED:
+    case HS_WIFI_CONNECTING:
+    case HS_WIFI_SCANNING:
+    case HS_PAIRING_NEEDED:
+    case HS_PAIRED:
+    case HS_ETH_CONNECTING:
+        homespan_setup_ap_active = false;
+        setWifiSetupInfoVisible(false, false);
+        break;
+    default:
+        break;
+    }
+}
+
 void updateOledProtection()
 {
     static unsigned long last_shift_update = 0;
@@ -1407,14 +1481,16 @@ void updateWiFiSymbol()
     }
 
     const wl_status_t wifiStatus = WiFi.status();
-    const bool isAPModeActive = (wifiStatus == WL_IDLE_STATUS || wifiStatus == WL_NO_SSID_AVAIL || wifiStatus == WL_NO_SHIELD);
+    const wifi_mode_t wifiMode = WiFi.getMode();
+    const bool showSetupInfo = isSetupAccessPointVisible() && wifiStatus != WL_CONNECTED;
     static wl_status_t lastStatus = WL_DISCONNECTED;
+    static wifi_mode_t lastMode = WIFI_MODE_NULL;
 
-    if (wifiStatus != lastStatus) {
+    if (wifiStatus != lastStatus || wifiMode != lastMode) {
         if (wifiStatus == WL_CONNECTED) {
             lv_label_set_text(ui_wifi_label, LV_SYMBOL_WIFI);
             lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_GREEN), 0);
-        } else if (isAPModeActive) {
+        } else if (showSetupInfo) {
             lv_label_set_text(ui_wifi_label, LV_SYMBOL_SETTINGS);
             lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_ORANGE), 0);
         } else {
@@ -1422,25 +1498,15 @@ void updateWiFiSymbol()
             lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_RED), 0);
         }
         lastStatus = wifiStatus;
+        lastMode = wifiMode;
     }
 
-    static bool switches_hidden = false;
     const lv_obj_t *current_tile = lv_tileview_get_tile_act(tileview);
 
     if (current_tile == tileMain || current_tile == tileSecond) {
-        if (isAPModeActive && !switches_hidden) {
-            lv_obj_clear_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
-            for (int i = 0; i < kNumUiSwitches; ++i) {
-                lv_obj_add_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
-            }
-            switches_hidden = true;
-        } else if (wifiStatus == WL_CONNECTED && switches_hidden) {
-            lv_obj_add_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
-            for (int i = 0; i < kNumUiSwitches; ++i) {
-                lv_obj_clear_flag(ui_switch_buttons[i], LV_OBJ_FLAG_HIDDEN);
-            }
-            switches_hidden = false;
-        }
+        setWifiSetupInfoVisible(showSetupInfo, false);
+    } else if (!showSetupInfo) {
+        setWifiSetupInfoVisible(false, false);
     }
 
     updateWeatherSetupButtonLabel();
@@ -2457,6 +2523,7 @@ void setup()
     applyTimezoneSetting(true);
 
     const String final_bridge_name = String("HOMEsmthng ") + BRIDGE_SUFFIX_STR;
+    homeSpan.setStatusCallback(homeSpanStatusCallback);
     homeSpan.begin(Category::Bridges, final_bridge_name.c_str());
     homeSpan.setApSSID("HOMEsmthng");
     homeSpan.setApPassword("");
