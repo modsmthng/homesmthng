@@ -143,11 +143,14 @@ lv_obj_t *tileview = nullptr;
 lv_obj_t *tileMain = nullptr;
 lv_obj_t *tileSecond = nullptr;
 lv_obj_t *tileMaster = nullptr;
+lv_obj_t *tileMasterClock = nullptr;
 lv_obj_t *tileSett = nullptr;
 lv_obj_t *tileDisplayCare = nullptr;
 lv_obj_t *tileCode = nullptr;
 lv_obj_t *ui_switch_buttons[kNumUiSwitches] = {};
 lv_obj_t *ui_big_button = nullptr;
+lv_obj_t *ui_master_clock_button = nullptr;
+lv_obj_t *ui_master_clock_info = nullptr;
 lv_obj_t *ui_wifi_label = nullptr;
 lv_obj_t *ui_brightness_slider = nullptr;
 lv_obj_t *ui_bl_toggle = nullptr;
@@ -179,11 +182,27 @@ lv_obj_t *screensaver_weather_sun_core = nullptr;
 lv_obj_t *screensaver_weather_sun_rays[8] = {};
 lv_obj_t *screensaver_weather_cloud_parts[4] = {};
 lv_obj_t *screensaver_weather_rain_lines[3] = {};
+lv_obj_t *master_clock_face = nullptr;
+lv_obj_t *master_hour_hand = nullptr;
+lv_obj_t *master_minute_hand = nullptr;
+lv_obj_t *master_second_hand = nullptr;
+lv_obj_t *master_center_dot = nullptr;
+lv_obj_t *master_weather_group = nullptr;
+lv_obj_t *master_weather_icon = nullptr;
+lv_obj_t *master_weather_temp_label = nullptr;
+lv_obj_t *master_weather_sun_core = nullptr;
+lv_obj_t *master_weather_sun_rays[8] = {};
+lv_obj_t *master_weather_cloud_parts[4] = {};
+lv_obj_t *master_weather_rain_lines[3] = {};
 
 lv_point_t screensaver_hour_points[2] = {};
 lv_point_t screensaver_minute_points[2] = {};
 lv_point_t screensaver_second_points[2] = {};
 lv_point_t screensaver_weather_sun_ray_points[8][2] = {};
+lv_point_t master_hour_points[2] = {};
+lv_point_t master_minute_points[2] = {};
+lv_point_t master_second_points[2] = {};
+lv_point_t master_weather_sun_ray_points[8][2] = {};
 
 lv_timer_t *screen2_timer = nullptr;
 WebServer weather_config_server(8080);
@@ -226,7 +245,9 @@ void updateWiFiSymbol();
 void safeSetBrightness(int target_brightness);
 void screen2_off_timer_cb(lv_timer_t *);
 void applyClockAccentColor(lv_color_t color);
+void updateMasterClockAppearance();
 void hideScrollbarVisuals(lv_obj_t *obj);
+void disableDecorationInteraction(lv_obj_t *obj);
 void updateScrollbarModes();
 bool supportsPixelShift();
 bool supportsClockSaver();
@@ -240,13 +261,17 @@ WeatherLocation selectedWeatherLocation();
 String selectedWeatherLocationLabel();
 void syncScreen2IdleTimer();
 void applyPixelShiftOffset(int shift_x, int shift_y);
+void setClockHandPoints(lv_point_t points[2], float angle_deg, lv_coord_t cx, lv_coord_t cy, lv_coord_t length, lv_coord_t tail);
 void updateScreensaverClock(bool force);
+void updateMasterClock(bool force);
+void updateMasterClockMode();
 void updateWeatherMonogram();
 bool extractJsonNumberField(const String &json, const char *key, float &value);
 bool parseFloatParameter(const String &text, float &value);
 WeatherGlyph glyphForWeatherCode(int code, bool is_day);
 const char *weatherGlyphLabel(WeatherGlyph glyph);
 void setScreensaverWeatherGlyph(WeatherGlyph glyph);
+void setMasterClockWeatherGlyph(WeatherGlyph glyph);
 bool fetchCurrentWeather();
 void updateWeatherIfNeeded();
 String htmlEscape(const String &text);
@@ -401,6 +426,28 @@ String selectedWeatherLocationLabel()
     return String(selectedTimezoneLabel());
 }
 
+bool isBigSwitchOn()
+{
+    if (ui_big_button) {
+        return lv_obj_has_state(ui_big_button, LV_STATE_CHECKED);
+    }
+
+    if (ui_master_clock_button) {
+        return lv_obj_has_state(ui_master_clock_button, LV_STATE_CHECKED);
+    }
+
+    if (homekit_switches[8]) {
+        return homekit_switches[8]->on->getVal();
+    }
+
+    return false;
+}
+
+bool isMasterClockTileActive()
+{
+    return tileview && tileMasterClock && lv_tileview_get_tile_act(tileview) == tileMasterClock;
+}
+
 void applyClockAccentColor(lv_color_t color)
 {
     if (screensaver_hour_hand) {
@@ -435,6 +482,56 @@ void applyClockAccentColor(lv_color_t color)
     }
 }
 
+void updateMasterClockAppearance()
+{
+    if (!ui_master_clock_button) {
+        return;
+    }
+
+    const bool inverted = isBigSwitchOn();
+    const lv_color_t accent = inverted ? lv_color_black() : active_switch_color;
+    const lv_color_t background = inverted ? active_switch_color : lv_color_black();
+
+    lv_obj_set_style_bg_color(ui_master_clock_button, background, 0);
+    lv_obj_set_style_bg_color(ui_master_clock_button, background, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(ui_master_clock_button, background, LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(ui_master_clock_button, background, LV_STATE_CHECKED | LV_STATE_PRESSED);
+
+    if (master_hour_hand) {
+        lv_obj_set_style_line_color(master_hour_hand, accent, 0);
+    }
+    if (master_minute_hand) {
+        lv_obj_set_style_line_color(master_minute_hand, accent, 0);
+    }
+    if (master_second_hand) {
+        lv_obj_set_style_line_color(master_second_hand, accent, 0);
+    }
+    if (master_center_dot) {
+        lv_obj_set_style_bg_color(master_center_dot, accent, 0);
+    }
+    if (master_weather_temp_label) {
+        lv_obj_set_style_text_color(master_weather_temp_label, accent, 0);
+    }
+    if (master_weather_sun_core) {
+        lv_obj_set_style_bg_color(master_weather_sun_core, accent, 0);
+    }
+    for (lv_obj_t *ray : master_weather_sun_rays) {
+        if (ray) {
+            lv_obj_set_style_line_color(ray, accent, 0);
+        }
+    }
+    for (lv_obj_t *cloud_part : master_weather_cloud_parts) {
+        if (cloud_part) {
+            lv_obj_set_style_bg_color(cloud_part, accent, 0);
+        }
+    }
+    for (lv_obj_t *rain_line : master_weather_rain_lines) {
+        if (rain_line) {
+            lv_obj_set_style_bg_color(rain_line, accent, 0);
+        }
+    }
+}
+
 void hideScrollbarVisuals(lv_obj_t *obj)
 {
     if (!obj) {
@@ -450,6 +547,16 @@ void hideScrollbarVisuals(lv_obj_t *obj)
     lv_obj_set_style_pad_left(obj, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_pad_top(obj, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_pad_bottom(obj, 0, LV_PART_SCROLLBAR);
+}
+
+void disableDecorationInteraction(lv_obj_t *obj)
+{
+    if (!obj) {
+        return;
+    }
+
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 void updateScrollbarModes()
@@ -468,6 +575,9 @@ void updateScrollbarModes()
     }
     if (tileMaster) {
         hideScrollbarVisuals(tileMaster);
+    }
+    if (tileMasterClock) {
+        hideScrollbarVisuals(tileMasterClock);
     }
     if (tileSett) {
         hideScrollbarVisuals(tileSett);
@@ -772,36 +882,176 @@ void setScreensaverWeatherGlyph(WeatherGlyph glyph)
     }
 }
 
-void updateWeatherMonogram()
+void setMasterClockWeatherGlyph(WeatherGlyph glyph)
 {
-    if (!screensaver_weather_group || !screensaver_weather_temp_label) {
+    const bool show_sun = (glyph == WeatherGlyph::Sun);
+    const bool show_cloud = (glyph == WeatherGlyph::Cloud || glyph == WeatherGlyph::Rain);
+    const bool show_rain = (glyph == WeatherGlyph::Rain);
+
+    if (master_weather_sun_core) {
+        if (show_sun) {
+            lv_obj_clear_flag(master_weather_sun_core, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(master_weather_sun_core, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    for (lv_obj_t *ray : master_weather_sun_rays) {
+        if (!ray) {
+            continue;
+        }
+        if (show_sun) {
+            lv_obj_clear_flag(ray, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(ray, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    for (lv_obj_t *cloud_part : master_weather_cloud_parts) {
+        if (!cloud_part) {
+            continue;
+        }
+        if (show_cloud) {
+            lv_obj_clear_flag(cloud_part, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(cloud_part, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    for (lv_obj_t *rain_line : master_weather_rain_lines) {
+        if (!rain_line) {
+            continue;
+        }
+        if (show_rain) {
+            lv_obj_clear_flag(rain_line, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(rain_line, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+void updateMasterClock(bool force)
+{
+    if (!ui_master_clock_button || !master_clock_face || !master_hour_hand || !master_minute_hand || !master_second_hand) {
         return;
     }
 
-    if (!weather_has_data) {
-        lv_obj_add_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
+    if (lv_obj_has_flag(ui_master_clock_button, LV_OBJ_FLAG_HIDDEN)) {
         return;
     }
 
-    setScreensaverWeatherGlyph(glyphForWeatherCode(weather_code, weather_is_day));
-    lv_label_set_text_fmt(screensaver_weather_temp_label, "%d°", weather_temperature_c);
+    if (!isMasterClockTileActive()) {
+        return;
+    }
+
+    static int last_second = -1;
 
     int hour = 0;
     int minute = 0;
     int second = 0;
     getScreensaverClockTime(hour, minute, second);
 
+    if (!force && second == last_second) {
+        return;
+    }
+    last_second = second;
+
+    const lv_coord_t face_size = lv_obj_get_width(master_clock_face);
+    const lv_coord_t cx = face_size / 2;
+    const lv_coord_t cy = face_size / 2;
+    const lv_coord_t hour_length = (face_size * 26) / 100;
+    const lv_coord_t minute_length = (face_size * 38) / 100;
+    const lv_coord_t second_length = (face_size * 42) / 100;
+    const lv_coord_t hour_tail = (face_size * 4) / 100;
+    const lv_coord_t minute_tail = (face_size * 5) / 100;
+    const lv_coord_t second_tail = (face_size * 7) / 100;
+
     const float hour_angle = ((hour % 12) + (minute / 60.0f)) * 30.0f - 90.0f;
+    const float minute_angle = (minute + (second / 60.0f)) * 6.0f - 90.0f;
+    const float second_angle = second * 6.0f - 90.0f;
+
+    setClockHandPoints(master_hour_points, hour_angle, cx, cy, hour_length, hour_tail);
+    setClockHandPoints(master_minute_points, minute_angle, cx, cy, minute_length, minute_tail);
+    setClockHandPoints(master_second_points, second_angle, cx, cy, second_length, second_tail);
+
+    lv_line_set_points(master_hour_hand, master_hour_points, 2);
+    lv_line_set_points(master_minute_hand, master_minute_points, 2);
+    lv_line_set_points(master_second_hand, master_second_points, 2);
+
+    if (!master_weather_group || !master_weather_temp_label) {
+        return;
+    }
+
+    if (!weather_has_data) {
+        lv_obj_add_flag(master_weather_group, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    setMasterClockWeatherGlyph(glyphForWeatherCode(weather_code, weather_is_day));
+    lv_label_set_text_fmt(master_weather_temp_label, "%d°", weather_temperature_c);
+
     const float hour_angle_rad = hour_angle * static_cast<float>(PI) / 180.0f;
     const bool hour_hand_in_top_half = sinf(hour_angle_rad) < 0.0f;
-    const lv_coord_t radial_midpoint_offset = lv_obj_get_height(screensaver_clock_face) / 4;
+    const lv_coord_t radial_midpoint_offset = lv_obj_get_height(master_clock_face) / 4;
 
-    lv_obj_clear_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(master_weather_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(
-        screensaver_weather_group,
+        master_weather_group,
         LV_ALIGN_CENTER,
         0,
         hour_hand_in_top_half ? radial_midpoint_offset : -radial_midpoint_offset);
+}
+
+void updateMasterClockMode()
+{
+    if (!ui_master_clock_button || !ui_master_clock_info) {
+        return;
+    }
+
+    if (isClockSaverEnabled()) {
+        lv_obj_add_flag(ui_master_clock_info, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ui_master_clock_button, LV_OBJ_FLAG_HIDDEN);
+        updateMasterClockAppearance();
+        if (isMasterClockTileActive()) {
+            updateMasterClock(true);
+        }
+    } else {
+        lv_obj_add_flag(ui_master_clock_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ui_master_clock_info, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void updateWeatherMonogram()
+{
+    if (screensaver_weather_group && screensaver_weather_temp_label) {
+        if (!weather_has_data) {
+            lv_obj_add_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            setScreensaverWeatherGlyph(glyphForWeatherCode(weather_code, weather_is_day));
+            lv_label_set_text_fmt(screensaver_weather_temp_label, "%d°", weather_temperature_c);
+
+            int hour = 0;
+            int minute = 0;
+            int second = 0;
+            getScreensaverClockTime(hour, minute, second);
+
+            const float hour_angle = ((hour % 12) + (minute / 60.0f)) * 30.0f - 90.0f;
+            const float hour_angle_rad = hour_angle * static_cast<float>(PI) / 180.0f;
+            const bool hour_hand_in_top_half = sinf(hour_angle_rad) < 0.0f;
+            const lv_coord_t radial_midpoint_offset = lv_obj_get_height(screensaver_clock_face) / 4;
+
+            lv_obj_clear_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(
+                screensaver_weather_group,
+                LV_ALIGN_CENTER,
+                0,
+                hour_hand_in_top_half ? radial_midpoint_offset : -radial_midpoint_offset);
+        }
+    }
+
+    if (isMasterClockTileActive()) {
+        updateMasterClock(true);
+    }
 }
 
 void applyTimezoneSetting(bool request_sync)
@@ -1415,6 +1665,8 @@ void updateOledProtection()
     static unsigned long last_shift_update = 0;
     static unsigned long last_clock_update = 0;
     static size_t shift_index = 0;
+    lv_obj_t *active_tile = tileview ? lv_tileview_get_tile_act(tileview) : nullptr;
+    const bool suppress_screensaver = (active_tile == tileMasterClock && isClockSaverEnabled());
 
     if (!supportsPixelShift() && !supportsClockSaver()) {
         if (screensaver_visible) {
@@ -1432,8 +1684,12 @@ void updateOledProtection()
         return;
     }
 
+    if (screensaver_visible && suppress_screensaver) {
+        hideScreensaver(false);
+    }
+
     if (isClockSaverEnabled()) {
-        if (!screensaver_visible && inactive_time >= kClockSaverIdleMs) {
+        if (!screensaver_visible && !suppress_screensaver && inactive_time >= kClockSaverIdleMs) {
             showScreensaver();
             last_clock_update = now;
         }
@@ -1527,11 +1783,24 @@ void updateLVGLState(uint8_t id, bool state)
         return;
     }
 
-    if (id == 8 && ui_big_button) {
-        if (state) {
-            lv_obj_add_state(ui_big_button, LV_STATE_CHECKED);
-        } else {
-            lv_obj_clear_state(ui_big_button, LV_STATE_CHECKED);
+    if (id == 8) {
+        if (ui_big_button) {
+            if (state) {
+                lv_obj_add_state(ui_big_button, LV_STATE_CHECKED);
+            } else {
+                lv_obj_clear_state(ui_big_button, LV_STATE_CHECKED);
+            }
+        }
+        if (ui_master_clock_button) {
+            if (state) {
+                lv_obj_add_state(ui_master_clock_button, LV_STATE_CHECKED);
+            } else {
+                lv_obj_clear_state(ui_master_clock_button, LV_STATE_CHECKED);
+            }
+        }
+        updateMasterClockAppearance();
+        if (isMasterClockTileActive()) {
+            updateMasterClock(true);
         }
     }
 }
@@ -1569,6 +1838,7 @@ void applyNewColor(lv_color_t new_color)
     }
 
     applyClockAccentColor(active_switch_color);
+    updateMasterClockAppearance();
 }
 
 void saveSettingsToNVS()
@@ -1647,6 +1917,7 @@ void big_switch_event_handler(lv_event_t *e)
 
     lv_obj_t *btn = lv_event_get_target(e);
     const bool newState = lv_obj_has_state(btn, LV_STATE_CHECKED);
+    updateLVGLState(8, newState);
 
     if (homekit_switches[8]) {
         homekit_switches[8]->on->setVal(newState);
@@ -1719,6 +1990,7 @@ void oled_clock_saver_toggle_event_handler(lv_event_t *e)
     if (!oled_clock_saver_enabled) {
         hideScreensaver(false);
     }
+    updateMasterClockMode();
     saveSettingsToNVS();
 }
 
@@ -1742,6 +2014,7 @@ void timezone_roller_event_handler(lv_event_t *e)
     if (screensaver_visible) {
         updateScreensaverClock(true);
     }
+    updateMasterClock(true);
 }
 
 void timezone_done_event_handler(lv_event_t *e)
@@ -1792,6 +2065,11 @@ void tileview_event_handler(lv_event_t *e)
     }
 
     updateScrollbarModes();
+    syncScreen2IdleTimer();
+
+    if (isMasterClockTileActive()) {
+        updateMasterClock(true);
+    }
 }
 
 String generateAndStoreBridgeSuffix()
@@ -1909,12 +2187,14 @@ void setupUI()
     tileMain = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_LEFT | LV_DIR_BOTTOM | LV_DIR_RIGHT);
     tileSecond = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_RIGHT | LV_DIR_LEFT);
     tileMaster = lv_tileview_add_tile(tileview, 0, 1, LV_DIR_TOP | LV_DIR_BOTTOM);
-    tileSett = lv_tileview_add_tile(tileview, 0, 2, LV_DIR_TOP | LV_DIR_BOTTOM | LV_DIR_RIGHT);
-    tileDisplayCare = lv_tileview_add_tile(tileview, 1, 2, LV_DIR_LEFT);
-    tileCode = lv_tileview_add_tile(tileview, 0, 3, LV_DIR_TOP);
+    tileMasterClock = lv_tileview_add_tile(tileview, 0, 2, LV_DIR_TOP | LV_DIR_BOTTOM);
+    tileSett = lv_tileview_add_tile(tileview, 0, 3, LV_DIR_TOP | LV_DIR_BOTTOM | LV_DIR_RIGHT);
+    tileDisplayCare = lv_tileview_add_tile(tileview, 1, 3, LV_DIR_LEFT);
+    tileCode = lv_tileview_add_tile(tileview, 0, 4, LV_DIR_TOP);
     lv_obj_set_style_anim_time(tileMain, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileSecond, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileMaster, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_anim_time(tileMasterClock, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileSett, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileDisplayCare, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileCode, 0, LV_PART_SCROLLBAR);
@@ -1922,6 +2202,7 @@ void setupUI()
     hideScrollbarVisuals(tileMain);
     hideScrollbarVisuals(tileSecond);
     hideScrollbarVisuals(tileMaster);
+    hideScrollbarVisuals(tileMasterClock);
     hideScrollbarVisuals(tileSett);
     hideScrollbarVisuals(tileDisplayCare);
     hideScrollbarVisuals(tileCode);
@@ -1978,6 +2259,160 @@ void setupUI()
     lv_obj_add_flag(ui_big_button, LV_OBJ_FLAG_CHECKABLE);
     lv_obj_clear_flag(ui_big_button, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
     lv_obj_add_event_cb(ui_big_button, big_switch_event_handler, LV_EVENT_CLICKED, nullptr);
+
+    ui_master_clock_button = lv_btn_create(tileMasterClock);
+    lv_obj_set_size(ui_master_clock_button, full_size, full_size);
+    lv_obj_center(ui_master_clock_button);
+    lv_obj_set_style_radius(ui_master_clock_button, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(ui_master_clock_button, 0, 0);
+    lv_obj_set_style_shadow_width(ui_master_clock_button, 0, 0);
+    lv_obj_set_style_pad_all(ui_master_clock_button, 0, 0);
+    lv_obj_set_style_bg_opa(ui_master_clock_button, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(ui_master_clock_button, lv_color_black(), 0);
+    lv_obj_add_flag(ui_master_clock_button, LV_OBJ_FLAG_CHECKABLE);
+    lv_obj_clear_flag(ui_master_clock_button, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_add_event_cb(ui_master_clock_button, big_switch_event_handler, LV_EVENT_CLICKED, nullptr);
+
+    master_clock_face = lv_obj_create(ui_master_clock_button);
+    const lv_coord_t master_face_size = full_size - scaleUi(8);
+    lv_obj_set_size(master_clock_face, master_face_size, master_face_size);
+    lv_obj_center(master_clock_face);
+    lv_obj_set_style_radius(master_clock_face, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(master_clock_face, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(master_clock_face, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(master_clock_face, 0, 0);
+    lv_obj_set_style_pad_all(master_clock_face, 0, 0);
+    hideScrollbarVisuals(master_clock_face);
+    disableDecorationInteraction(master_clock_face);
+
+    master_hour_hand = lv_line_create(master_clock_face);
+    lv_obj_set_size(master_hour_hand, master_face_size, master_face_size);
+    lv_obj_set_pos(master_hour_hand, 0, 0);
+    lv_obj_set_style_line_width(master_hour_hand, scaleUi(6), 0);
+    lv_obj_set_style_line_rounded(master_hour_hand, true, 0);
+    disableDecorationInteraction(master_hour_hand);
+
+    master_minute_hand = lv_line_create(master_clock_face);
+    lv_obj_set_size(master_minute_hand, master_face_size, master_face_size);
+    lv_obj_set_pos(master_minute_hand, 0, 0);
+    lv_obj_set_style_line_width(master_minute_hand, scaleUi(4), 0);
+    lv_obj_set_style_line_rounded(master_minute_hand, true, 0);
+    disableDecorationInteraction(master_minute_hand);
+
+    master_second_hand = lv_line_create(master_clock_face);
+    lv_obj_set_size(master_second_hand, master_face_size, master_face_size);
+    lv_obj_set_pos(master_second_hand, 0, 0);
+    lv_obj_set_style_line_width(master_second_hand, scaleUi(2), 0);
+    lv_obj_set_style_line_rounded(master_second_hand, true, 0);
+    disableDecorationInteraction(master_second_hand);
+
+    master_center_dot = lv_obj_create(master_clock_face);
+    lv_obj_remove_style_all(master_center_dot);
+    lv_obj_set_size(master_center_dot, scaleUi(10), scaleUi(10));
+    lv_obj_center(master_center_dot);
+    lv_obj_set_style_radius(master_center_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(master_center_dot, LV_OPA_90, 0);
+    disableDecorationInteraction(master_center_dot);
+
+    master_weather_group = lv_obj_create(master_clock_face);
+    lv_obj_remove_style_all(master_weather_group);
+    lv_obj_set_size(master_weather_group, scaleUi(156), scaleUi(58));
+    lv_obj_set_style_bg_opa(master_weather_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_layout(master_weather_group, LV_LAYOUT_FLEX, 0);
+    lv_obj_set_flex_flow(master_weather_group, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(master_weather_group, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(master_weather_group, 0, 0);
+    lv_obj_set_style_pad_gap(master_weather_group, scaleUi(10), 0);
+    lv_obj_add_flag(master_weather_group, LV_OBJ_FLAG_HIDDEN);
+    hideScrollbarVisuals(master_weather_group);
+    disableDecorationInteraction(master_weather_group);
+
+    master_weather_icon = lv_obj_create(master_weather_group);
+    lv_obj_remove_style_all(master_weather_icon);
+    lv_obj_set_size(master_weather_icon, scaleUi(42), scaleUi(42));
+    lv_obj_set_style_bg_opa(master_weather_icon, LV_OPA_TRANSP, 0);
+    disableDecorationInteraction(master_weather_icon);
+
+    master_weather_sun_core = lv_obj_create(master_weather_icon);
+    lv_obj_remove_style_all(master_weather_sun_core);
+    lv_obj_set_size(master_weather_sun_core, scaleUi(18), scaleUi(18));
+    lv_obj_align(master_weather_sun_core, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(master_weather_sun_core, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(master_weather_sun_core, LV_OPA_COVER, 0);
+    disableDecorationInteraction(master_weather_sun_core);
+
+    const lv_coord_t master_sun_center = scaleUi(21);
+    const float master_sun_inner_radius = static_cast<float>(scaleUi(12));
+    const float master_sun_outer_radius = static_cast<float>(scaleUi(18));
+    for (int i = 0; i < 8; ++i) {
+        const float angle_deg = -90.0f + static_cast<float>(i * 45);
+        const float angle_rad = angle_deg * static_cast<float>(PI) / 180.0f;
+        const float cos_value = cosf(angle_rad);
+        const float sin_value = sinf(angle_rad);
+
+        master_weather_sun_ray_points[i][0] = {
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(master_sun_center) + (cos_value * master_sun_inner_radius))),
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(master_sun_center) + (sin_value * master_sun_inner_radius)))};
+        master_weather_sun_ray_points[i][1] = {
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(master_sun_center) + (cos_value * master_sun_outer_radius))),
+            static_cast<lv_coord_t>(lroundf(static_cast<float>(master_sun_center) + (sin_value * master_sun_outer_radius)))};
+        master_weather_sun_rays[i] = lv_line_create(master_weather_icon);
+        lv_line_set_points(master_weather_sun_rays[i], master_weather_sun_ray_points[i], 2);
+        lv_obj_set_style_line_width(master_weather_sun_rays[i], scaleUi(2), 0);
+        lv_obj_set_style_line_rounded(master_weather_sun_rays[i], true, 0);
+        lv_obj_set_style_line_opa(master_weather_sun_rays[i], LV_OPA_COVER, 0);
+        hideScrollbarVisuals(master_weather_sun_rays[i]);
+        disableDecorationInteraction(master_weather_sun_rays[i]);
+    }
+
+    const lv_coord_t master_cloud_rects[4][4] = {
+        {scaleUi(3), scaleUi(14), scaleUi(15), scaleUi(15)},
+        {scaleUi(13), scaleUi(8), scaleUi(18), scaleUi(18)},
+        {scaleUi(26), scaleUi(14), scaleUi(13), scaleUi(13)},
+        {scaleUi(8), scaleUi(21), scaleUi(28), scaleUi(11)},
+    };
+    for (int i = 0; i < 4; ++i) {
+        master_weather_cloud_parts[i] = lv_obj_create(master_weather_icon);
+        lv_obj_remove_style_all(master_weather_cloud_parts[i]);
+        lv_obj_set_size(master_weather_cloud_parts[i], master_cloud_rects[i][2], master_cloud_rects[i][3]);
+        lv_obj_set_pos(master_weather_cloud_parts[i], master_cloud_rects[i][0], master_cloud_rects[i][1]);
+        lv_obj_set_style_radius(master_weather_cloud_parts[i], (i == 3) ? scaleUi(6) : LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(master_weather_cloud_parts[i], LV_OPA_COVER, 0);
+        disableDecorationInteraction(master_weather_cloud_parts[i]);
+    }
+
+    const lv_coord_t master_rain_rects[3][4] = {
+        {scaleUi(11), scaleUi(31), scaleUi(2), scaleUi(8)},
+        {scaleUi(20), scaleUi(33), scaleUi(2), scaleUi(8)},
+        {scaleUi(29), scaleUi(31), scaleUi(2), scaleUi(8)},
+    };
+    for (int i = 0; i < 3; ++i) {
+        master_weather_rain_lines[i] = lv_obj_create(master_weather_icon);
+        lv_obj_remove_style_all(master_weather_rain_lines[i]);
+        lv_obj_set_size(master_weather_rain_lines[i], master_rain_rects[i][2], master_rain_rects[i][3]);
+        lv_obj_set_pos(master_weather_rain_lines[i], master_rain_rects[i][0], master_rain_rects[i][1]);
+        lv_obj_set_style_radius(master_weather_rain_lines[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(master_weather_rain_lines[i], LV_OPA_COVER, 0);
+        disableDecorationInteraction(master_weather_rain_lines[i]);
+    }
+
+    master_weather_temp_label = lv_label_create(master_weather_group);
+    lv_label_set_text(master_weather_temp_label, "--°");
+    lv_obj_set_style_text_font(master_weather_temp_label, &lv_font_montserrat_28, 0);
+    disableDecorationInteraction(master_weather_temp_label);
+
+    ui_master_clock_info = lv_label_create(tileMasterClock);
+    lv_label_set_text(
+        ui_master_clock_info,
+        "Enable Clock Saver on the\n"
+        "Display page to use the\n"
+        "B1 clock screen.");
+    lv_obj_set_width(ui_master_clock_info, full_size - scaleUi(60));
+    lv_obj_align(ui_master_clock_info, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_text_align(ui_master_clock_info, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(ui_master_clock_info, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(ui_master_clock_info, lv_color_white(), 0);
+    disableDecorationInteraction(ui_master_clock_info);
 
     lv_obj_t *lbl_set = lv_label_create(tileSett);
     lv_label_set_text(lbl_set, "Settings");
@@ -2492,9 +2927,12 @@ void setupUI()
     lv_obj_set_style_text_color(screensaver_weather_temp_label, lv_color_white(), 0);
 
     applyClockAccentColor(active_switch_color);
+    updateMasterClockAppearance();
     setScreensaverWeatherGlyph(weather_glyph);
+    setMasterClockWeatherGlyph(weather_glyph);
     updateWeatherMonogram();
     updateScreensaverClock(true);
+    updateMasterClockMode();
     updateScrollbarModes();
 }
 
@@ -2549,6 +2987,7 @@ void setup()
             updateLVGLState(static_cast<uint8_t>(i), homekit_switches[i]->on->getVal());
         }
     }
+    updateMasterClockMode();
 
     delay(100);
     updateWiFiSymbol();
@@ -2573,6 +3012,9 @@ void loop()
         updateWiFiSymbol();
         ensureTimeIsConfigured();
         updateWeatherIfNeeded();
+        if (isMasterClockTileActive()) {
+            updateMasterClock(false);
+        }
         logWeatherConfigUrls();
     }
 
