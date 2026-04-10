@@ -34,6 +34,7 @@ constexpr uint32_t kWeatherRetryMs = 60UL * 1000UL;
 constexpr int kPixelShiftAmplitude = 2;
 constexpr time_t kValidClockEpoch = 1704067200; // 2024-01-01 00:00:00 UTC
 constexpr int kDefaultTimezoneIndex = 1;
+constexpr int kWeatherSearchResultLimit = 8;
 
 constexpr int8_t kPixelShiftSteps[][2] = {
     {0, 0},
@@ -85,6 +86,15 @@ constexpr char kTimezoneDropdownOptions[] =
 struct WeatherLocation {
     float latitude;
     float longitude;
+};
+
+struct WeatherSearchResult {
+    String name;
+    String admin1;
+    String country;
+    float latitude = 0.0f;
+    float longitude = 0.0f;
+    bool valid = false;
 };
 
 enum class WeatherGlyph {
@@ -267,18 +277,34 @@ void updateMasterClock(bool force);
 void updateMasterClockMode();
 void updateWeatherMonogram();
 bool extractJsonNumberField(const String &json, const char *key, float &value);
+bool extractJsonStringField(const String &json, const char *key, String &value);
 bool parseFloatParameter(const String &text, float &value);
+String urlEncode(const String &text);
 WeatherGlyph glyphForWeatherCode(int code, bool is_day);
 const char *weatherGlyphLabel(WeatherGlyph glyph);
 void setScreensaverWeatherGlyph(WeatherGlyph glyph);
 void setMasterClockWeatherGlyph(WeatherGlyph glyph);
 bool fetchCurrentWeather();
+int parseWeatherSearchResults(const String &json, WeatherSearchResult results[], int max_results);
+bool fetchWeatherSearchResults(
+    const String &query,
+    WeatherSearchResult results[],
+    int max_results,
+    int &result_count,
+    String &error_message);
 void updateWeatherIfNeeded();
 String htmlEscape(const String &text);
+String weatherSearchDisplayName(const WeatherSearchResult &result);
 String renderWebHomePage();
-String renderWeatherConfigPage(const String &message = "");
+String renderWeatherConfigPage(
+    const String &message = "",
+    const String &search_query = "",
+    const WeatherSearchResult *search_results = nullptr,
+    int search_result_count = 0,
+    const String &search_message = "");
 void handleWebHome();
 void handleWeatherConfigRoot();
+void handleWeatherConfigSearch();
 void handleWeatherConfigSave();
 void handleWeatherConfigReset();
 void startWeatherConfigServer();
@@ -707,6 +733,68 @@ bool extractJsonNumberField(const String &json, const char *key, float &value)
     return true;
 }
 
+bool extractJsonStringField(const String &json, const char *key, String &value)
+{
+    const String pattern = String("\"") + key + "\":\"";
+    int start = json.indexOf(pattern);
+    if (start < 0) {
+        return false;
+    }
+
+    start += pattern.length();
+    String parsed;
+    parsed.reserve(32);
+    bool escape = false;
+
+    for (int i = start; i < json.length(); ++i) {
+        const char c = json[i];
+
+        if (escape) {
+            switch (c) {
+            case '"':
+            case '\\':
+            case '/':
+                parsed += c;
+                break;
+            case 'b':
+                parsed += '\b';
+                break;
+            case 'f':
+                parsed += '\f';
+                break;
+            case 'n':
+                parsed += '\n';
+                break;
+            case 'r':
+                parsed += '\r';
+                break;
+            case 't':
+                parsed += '\t';
+                break;
+            default:
+                parsed += c;
+                break;
+            }
+            escape = false;
+            continue;
+        }
+
+        if (c == '\\') {
+            escape = true;
+            continue;
+        }
+
+        if (c == '"') {
+            value = parsed;
+            return true;
+        }
+
+        parsed += c;
+    }
+
+    return false;
+}
+
 bool parseFloatParameter(const String &text, float &value)
 {
     String trimmed = text;
@@ -720,6 +808,38 @@ bool parseFloatParameter(const String &text, float &value)
     char *parse_end = nullptr;
     value = strtof(trimmed.c_str(), &parse_end);
     return parse_end != trimmed.c_str() && parse_end && *parse_end == '\0';
+}
+
+String urlEncode(const String &text)
+{
+    String encoded;
+    encoded.reserve(text.length() * 3);
+
+    for (size_t i = 0; i < text.length(); ++i) {
+        const uint8_t c = static_cast<uint8_t>(text[i]);
+        const bool is_unreserved =
+            (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~';
+
+        if (is_unreserved) {
+            encoded += static_cast<char>(c);
+            continue;
+        }
+
+        if (c == ' ') {
+            encoded += "%20";
+            continue;
+        }
+
+        char buffer[4];
+        snprintf(buffer, sizeof(buffer), "%02X", c);
+        encoded += '%';
+        encoded += buffer;
+    }
+
+    return encoded;
 }
 
 void getScreensaverClockTime(int &hour, int &minute, int &second)
@@ -775,7 +895,7 @@ void updateWeatherSetupModalContent()
     const String location_label = selectedWeatherLocationLabel();
     String body;
     body.reserve(256);
-    body += "Set the exact weather location in your browser.\n\n";
+    body += "Search for a city or village, or set exact coordinates in your browser.\n\n";
     body += "Current source\n";
     body += location_label;
     body += "\n\n";
@@ -1226,6 +1346,166 @@ void updateWeatherIfNeeded()
     fetchCurrentWeather();
 }
 
+int parseWeatherSearchResults(const String &json, WeatherSearchResult results[], int max_results)
+{
+    if (!results || max_results <= 0) {
+        return 0;
+    }
+
+    const int results_key = json.indexOf("\"results\":");
+    if (results_key < 0) {
+        return 0;
+    }
+
+    const int array_start = json.indexOf('[', results_key);
+    if (array_start < 0) {
+        return 0;
+    }
+
+    int result_count = 0;
+    int array_depth = 1;
+    int object_depth = 0;
+    int object_start = -1;
+    bool in_string = false;
+    bool escape = false;
+
+    for (int i = array_start + 1; i < json.length() && array_depth > 0; ++i) {
+        const char c = json[i];
+
+        if (escape) {
+            escape = false;
+            continue;
+        }
+
+        if (c == '\\' && in_string) {
+            escape = true;
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+
+        if (in_string) {
+            continue;
+        }
+
+        if (c == '[') {
+            ++array_depth;
+            continue;
+        }
+
+        if (c == ']') {
+            --array_depth;
+            continue;
+        }
+
+        if (c == '{') {
+            if (array_depth == 1 && object_depth == 0) {
+                object_start = i;
+            }
+            ++object_depth;
+            continue;
+        }
+
+        if (c == '}') {
+            --object_depth;
+            if (array_depth == 1 && object_depth == 0 && object_start >= 0) {
+                WeatherSearchResult result;
+                const String object_json = json.substring(object_start, i + 1);
+
+                String name;
+                String admin1;
+                String country;
+                float latitude = 0.0f;
+                float longitude = 0.0f;
+
+                if (extractJsonStringField(object_json, "name", name) &&
+                    extractJsonNumberField(object_json, "latitude", latitude) &&
+                    extractJsonNumberField(object_json, "longitude", longitude) &&
+                    isValidWeatherCoordinates(latitude, longitude)) {
+                    extractJsonStringField(object_json, "admin1", admin1);
+                    extractJsonStringField(object_json, "country", country);
+
+                    result.name = name;
+                    result.admin1 = admin1;
+                    result.country = country;
+                    result.latitude = latitude;
+                    result.longitude = longitude;
+                    result.valid = true;
+                    results[result_count++] = result;
+
+                    if (result_count >= max_results) {
+                        break;
+                    }
+                }
+
+                object_start = -1;
+            }
+        }
+    }
+
+    return result_count;
+}
+
+bool fetchWeatherSearchResults(
+    const String &query,
+    WeatherSearchResult results[],
+    int max_results,
+    int &result_count,
+    String &error_message)
+{
+    result_count = 0;
+    error_message = "";
+
+    if (WiFi.status() != WL_CONNECTED) {
+        error_message = "City search needs a Wi-Fi internet connection.";
+        return false;
+    }
+
+    String trimmed_query = query;
+    trimmed_query.trim();
+    if (trimmed_query.length() < 2) {
+        error_message = "Please enter at least 2 characters.";
+        return false;
+    }
+
+    String url = "https://geocoding-api.open-meteo.com/v1/search?name=";
+    url += urlEncode(trimmed_query);
+    url += "&count=";
+    url += String(max_results);
+    url += "&language=de&format=json";
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient http;
+    http.setTimeout(5000);
+    if (!http.begin(client, url)) {
+        error_message = "Unable to start the city search request.";
+        return false;
+    }
+
+    const int status = http.GET();
+    if (status != HTTP_CODE_OK) {
+        http.end();
+        error_message = "City search failed. Please try again in a moment.";
+        return false;
+    }
+
+    const String payload = http.getString();
+    http.end();
+
+    result_count = parseWeatherSearchResults(payload, results, max_results);
+    if (result_count <= 0) {
+        error_message = "No matching city or village was found.";
+        return false;
+    }
+
+    return true;
+}
+
 String htmlEscape(const String &text)
 {
     String escaped;
@@ -1257,6 +1537,23 @@ String htmlEscape(const String &text)
     return escaped;
 }
 
+String weatherSearchDisplayName(const WeatherSearchResult &result)
+{
+    String label = result.name;
+
+    if (result.admin1.length() > 0 && result.admin1 != result.name) {
+        label += ", ";
+        label += result.admin1;
+    }
+
+    if (result.country.length() > 0) {
+        label += ", ";
+        label += result.country;
+    }
+
+    return label;
+}
+
 String renderWebHomePage()
 {
     String page;
@@ -1286,7 +1583,12 @@ String renderWebHomePage()
     return page;
 }
 
-String renderWeatherConfigPage(const String &message)
+String renderWeatherConfigPage(
+    const String &message,
+    const String &search_query,
+    const WeatherSearchResult *search_results,
+    int search_result_count,
+    const String &search_message)
 {
     const WeatherLocation current_location = selectedWeatherLocation();
     const String current_label = selectedWeatherLocationLabel();
@@ -1297,6 +1599,8 @@ String renderWeatherConfigPage(const String &message)
     const String escaped_label = htmlEscape(current_label);
     const String escaped_name = htmlEscape(custom_name);
     const String escaped_message = htmlEscape(message);
+    const String escaped_search_query = htmlEscape(search_query);
+    const String escaped_search_message = htmlEscape(search_message);
 
     String weather_status = "Waiting for weather data";
     if (weather_has_data) {
@@ -1306,7 +1610,7 @@ String renderWeatherConfigPage(const String &message)
     }
 
     String page;
-    page.reserve(5000);
+    page.reserve(9000);
     page += F(
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -1323,6 +1627,12 @@ String renderWeatherConfigPage(const String &message)
         "button{border:0;border-radius:999px;padding:12px 18px;font-size:15px;font-weight:600;cursor:pointer;}"
         ".primary{background:#68724D;color:#fff;}.secondary{background:#273038;color:#fff;}.danger{background:#3a2020;color:#fff;}"
         ".msg{margin-bottom:16px;padding:12px 14px;border-radius:12px;background:#1f2d24;color:#d7f2df;}"
+        ".search-results{display:flex;flex-direction:column;gap:10px;margin-top:16px;}"
+        ".result-form{margin:0;}"
+        ".result-btn{width:100%;text-align:left;background:#111517;border:1px solid #2a2f33;border-radius:14px;padding:14px 16px;color:#fff;}"
+        ".result-title{display:block;font-size:16px;font-weight:700;margin-bottom:4px;}"
+        ".result-meta{display:block;color:#c7cccf;font-size:14px;line-height:1.35;}"
+        ".subtle{color:#98a1a6;font-size:14px;}"
         ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:#c7cccf;}"
         ".toplink{display:inline-block;margin-bottom:14px;color:#c7cccf;text-decoration:none;}"
         "</style></head><body><div class=\"wrap\">"
@@ -1337,6 +1647,44 @@ String renderWeatherConfigPage(const String &message)
     page += "<p><strong>Current source:</strong> " + escaped_label + "<br>";
     page += "<strong>Coordinates:</strong> <span class=\"mono\">" + String(current_location.latitude, 6) + ", " + String(current_location.longitude, 6) + "</span><br>";
     page += "<strong>Current weather:</strong> " + weather_status + "</p></div>";
+
+    page += F("<div class=\"card\"><h2>Find City or Village</h2>"
+              "<p>Search for a place name and save the matching coordinates directly.</p>"
+              "<form method=\"GET\" action=\"/weather/search\">"
+              "<label for=\"query\">Place name</label>");
+    page += "<input id=\"query\" name=\"query\" value=\"" + escaped_search_query + "\" placeholder=\"e.g. Berlin, Tegernsee, Winterberg\">";
+    page += F("<div class=\"actions\"><button class=\"primary\" type=\"submit\">Search place</button></div></form>");
+    page += F("<p class=\"subtle\">Search uses Open-Meteo geocoding and needs an active Wi-Fi internet connection.</p>");
+
+    if (search_message.length() > 0) {
+        page += "<div class=\"msg\">" + escaped_search_message + "</div>";
+    }
+
+    if (search_results && search_result_count > 0) {
+        page += "<div class=\"search-results\">";
+        for (int i = 0; i < search_result_count; ++i) {
+            if (!search_results[i].valid) {
+                continue;
+            }
+
+            const String display_name = weatherSearchDisplayName(search_results[i]);
+            const String escaped_display_name = htmlEscape(display_name);
+            const String escaped_result_name = htmlEscape(display_name);
+
+            page += F("<form method=\"POST\" action=\"/weather/save\" class=\"result-form\">");
+            page += "<input type=\"hidden\" name=\"name\" value=\"" + escaped_result_name + "\">";
+            page += "<input type=\"hidden\" name=\"latitude\" value=\"" + String(search_results[i].latitude, 6) + "\">";
+            page += "<input type=\"hidden\" name=\"longitude\" value=\"" + String(search_results[i].longitude, 6) + "\">";
+            page += F("<button class=\"result-btn\" type=\"submit\">");
+            page += "<span class=\"result-title\">" + escaped_display_name + "</span>";
+            page += "<span class=\"result-meta mono\">" + String(search_results[i].latitude, 6) + ", " +
+                    String(search_results[i].longitude, 6) + "</span>";
+            page += F("</button></form>");
+        }
+        page += F("</div>");
+    }
+
+    page += F("</div>");
 
     page += F("<div class=\"card\"><h2>Custom Location</h2>"
               "<form method=\"POST\" action=\"/weather/save\">"
@@ -1382,6 +1730,34 @@ void handleWebHome()
 void handleWeatherConfigRoot()
 {
     weather_config_server.send(200, "text/html; charset=utf-8", renderWeatherConfigPage());
+}
+
+void handleWeatherConfigSearch()
+{
+    String query = weather_config_server.arg("query");
+    query.trim();
+
+    if (query.length() < 2) {
+        weather_config_server.send(
+            400,
+            "text/html; charset=utf-8",
+            renderWeatherConfigPage("", query, nullptr, 0, "Please enter at least 2 characters."));
+        return;
+    }
+
+    WeatherSearchResult results[kWeatherSearchResultLimit] = {};
+    int result_count = 0;
+    String error_message;
+    const bool success = fetchWeatherSearchResults(query, results, kWeatherSearchResultLimit, result_count, error_message);
+    String page_message = error_message;
+    if (success) {
+        page_message = String(result_count) + ((result_count == 1) ? " matching place found." : " matching places found.");
+    }
+
+    weather_config_server.send(
+        200,
+        "text/html; charset=utf-8",
+        renderWeatherConfigPage("", query, success ? results : nullptr, success ? result_count : 0, page_message));
 }
 
 void handleWeatherConfigSave()
@@ -1441,6 +1817,7 @@ void startWeatherConfigServer()
 
     weather_config_server.on("/", HTTP_GET, handleWebHome);
     weather_config_server.on("/weather", HTTP_GET, handleWeatherConfigRoot);
+    weather_config_server.on("/weather/search", HTTP_GET, handleWeatherConfigSearch);
     weather_config_server.on("/weather/save", HTTP_POST, handleWeatherConfigSave);
     weather_config_server.on("/weather/reset", HTTP_POST, handleWeatherConfigReset);
     weather_config_server_routes_registered = true;
@@ -2250,18 +2627,26 @@ void setupUI()
     lv_obj_add_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
 
     ui_big_button = lv_btn_create(tileMaster);
-    lv_obj_set_size(ui_big_button, full_size, full_size);
+    lv_obj_set_size(ui_big_button, viewport_size, viewport_size);
     lv_obj_center(ui_big_button);
     lv_obj_set_style_radius(ui_big_button, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(ui_big_button, lv_color_black(), 0);
     lv_obj_set_style_bg_color(ui_big_button, active_switch_color, LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(ui_big_button, active_switch_color, LV_STATE_CHECKED | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(ui_big_button, 0, 0);
+    lv_obj_set_style_shadow_width(ui_big_button, 0, LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(ui_big_button, 0, LV_STATE_CHECKED);
+    lv_obj_set_style_shadow_width(ui_big_button, 0, LV_STATE_CHECKED | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_opa(ui_big_button, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_opa(ui_big_button, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_opa(ui_big_button, LV_OPA_TRANSP, LV_STATE_CHECKED);
+    lv_obj_set_style_shadow_opa(ui_big_button, LV_OPA_TRANSP, LV_STATE_CHECKED | LV_STATE_PRESSED);
     lv_obj_add_flag(ui_big_button, LV_OBJ_FLAG_CHECKABLE);
     lv_obj_clear_flag(ui_big_button, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
     lv_obj_add_event_cb(ui_big_button, big_switch_event_handler, LV_EVENT_CLICKED, nullptr);
 
     ui_master_clock_button = lv_btn_create(tileMasterClock);
-    lv_obj_set_size(ui_master_clock_button, full_size, full_size);
+    lv_obj_set_size(ui_master_clock_button, viewport_size, viewport_size);
     lv_obj_center(ui_master_clock_button);
     lv_obj_set_style_radius(ui_master_clock_button, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(ui_master_clock_button, 0, 0);
