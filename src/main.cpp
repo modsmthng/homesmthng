@@ -11,7 +11,10 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <lvgl.h>
+#include <nvs.h>
+#include <qrcodegen.h>
 
 #include <math.h>
 #include <memory>
@@ -26,15 +29,27 @@ constexpr int kNumUiSwitches = 8;
 constexpr int kNumColors = 6;
 constexpr int kNumTimezones = 9;
 constexpr int kTimezoneVisibleRows = 5;
-constexpr uint32_t kClockSaverIdleMs = 45000;
+constexpr int kWebBrightnessScaleMax = 10;
+constexpr int kDefaultBrightnessScale = 8;
+constexpr uint32_t kDefaultColorHex = 0xF5F1E8;
+constexpr uint32_t kClockSaverIdleMs = 60000;
+constexpr uint32_t kClockSaverMinIdleMs = 10000;
+constexpr uint32_t kClockSaverMaxIdleMs = 3600000;
 constexpr uint32_t kClockWakeDetectMs = 250;
 constexpr uint32_t kPixelShiftIntervalMs = 30000;
 constexpr uint32_t kWeatherRefreshMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kWeatherRetryMs = 60UL * 1000UL;
+constexpr uint32_t kDeferredRebootMs = 1500;
 constexpr int kPixelShiftAmplitude = 2;
 constexpr time_t kValidClockEpoch = 1704067200; // 2024-01-01 00:00:00 UTC
 constexpr int kDefaultTimezoneIndex = 1;
-constexpr int kWeatherSearchResultLimit = 8;
+constexpr int kWeatherSearchResultLimit = 5;
+constexpr uint16_t kAdminWebPort = 8080;
+constexpr uint16_t kProvisioningPort = 80;
+constexpr char kHomeKitSetupId[] = "HSPN";
+constexpr char kHomeSpanWifiNamespace[] = "WIFI";
+constexpr char kHomeSpanWifiKey[] = "WIFIDATA";
+constexpr char kDefaultHostBase[] = "homesmthng";
 
 constexpr int8_t kPixelShiftSteps[][2] = {
     {0, 0},
@@ -49,7 +64,8 @@ constexpr int8_t kPixelShiftSteps[][2] = {
 };
 
 const char *kSwitchNames[kNumSwitches] = {"S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "B1"};
-const uint32_t kColorHexOptions[kNumColors] = {0xFF0000, 0xFF9900, 0xCCCCCC, 0x0000FF, 0x68724D, 0xF99963};
+const uint32_t kColorHexOptions[kNumColors] = {0xFF0000, 0xFF9900, 0xF5F1E8, 0xA8C6FE, 0x68724D, 0xF99963};
+const char *kColorLabels[kNumColors] = {"Red", "Orange", "Warm White", "Blue", "Olive", "Peach"};
 const char *kTimezoneLabels[kNumTimezones] = {
     "UTC",
     "Berlin",
@@ -95,6 +111,11 @@ struct WeatherSearchResult {
     float latitude = 0.0f;
     float longitude = 0.0f;
     bool valid = false;
+};
+
+struct StoredWifiCredentials {
+    char ssid[MAX_SSID + 1] = "";
+    char pwd[MAX_PWD + 1] = "";
 };
 
 enum class WeatherGlyph {
@@ -145,6 +166,8 @@ String HOMEKIT_PAIRING_CODE_STR = "22446688";
 const char *HOMEKIT_PAIRING_CODE = nullptr;
 String BRIDGE_SUFFIX_STR;
 String weather_location_name;
+String device_host_name;
+String device_label;
 
 lv_obj_t *ui_root = nullptr;
 lv_obj_t *ui_viewport = nullptr;
@@ -162,10 +185,12 @@ lv_obj_t *ui_big_button = nullptr;
 lv_obj_t *ui_master_clock_button = nullptr;
 lv_obj_t *ui_master_clock_info = nullptr;
 lv_obj_t *ui_wifi_label = nullptr;
+lv_obj_t *ui_settings_web_links_label = nullptr;
 lv_obj_t *ui_brightness_slider = nullptr;
 lv_obj_t *ui_bl_toggle = nullptr;
 lv_obj_t *ui_wifi_setup_msg = nullptr;
 lv_obj_t *ui_pixel_shift_toggle = nullptr;
+lv_obj_t *ui_clock_button_toggle = nullptr;
 lv_obj_t *ui_clock_saver_toggle = nullptr;
 lv_obj_t *ui_timezone_button = nullptr;
 lv_obj_t *ui_timezone_value_label = nullptr;
@@ -215,19 +240,24 @@ lv_point_t master_second_points[2] = {};
 lv_point_t master_weather_sun_ray_points[8][2] = {};
 
 lv_timer_t *screen2_timer = nullptr;
-WebServer weather_config_server(8080);
+WebServer weather_config_server(kAdminWebPort);
+WebServer provisioning_server(kProvisioningPort);
+DNSServer provisioning_dns_server;
 
-int global_brightness = 12;
+int global_brightness = 13;
 int current_display_brightness = -1;
 bool screen2_bl_always_on = true;
 bool oled_pixel_shift_enabled = false;
-bool oled_clock_saver_enabled = false;
+bool oled_clock_saver_enabled = true;
+bool clock_button_screen_enabled = true;
+uint32_t clock_saver_idle_ms = kClockSaverIdleMs;
 bool screensaver_visible = false;
 int pixel_shift_x = 0;
 int pixel_shift_y = 0;
 int timezone_index = kDefaultTimezoneIndex;
 bool timezone_sync_pending = true;
 bool weather_use_custom_location = false;
+bool weather_enabled = true;
 bool weather_has_data = false;
 bool weather_refresh_pending = true;
 int weather_temperature_c = 0;
@@ -240,10 +270,16 @@ unsigned long weather_last_success_ms = 0;
 WeatherGlyph weather_glyph = WeatherGlyph::Cloud;
 bool weather_config_server_routes_registered = false;
 bool weather_config_server_running = false;
-bool homespan_setup_ap_active = false;
+bool provisioning_server_routes_registered = false;
+bool provisioning_server_running = false;
+bool provisioning_mode_active = false;
 bool wifi_setup_info_visible = false;
+bool homespan_started = false;
+bool homekit_is_paired = false;
+bool reboot_scheduled = false;
+unsigned long reboot_scheduled_at = 0;
 
-uint32_t active_switch_color_hex = 0x68724D;
+uint32_t active_switch_color_hex = kDefaultColorHex;
 lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
 
 uint8_t switch_button_ids[kNumUiSwitches] = {};
@@ -253,6 +289,7 @@ void saveSettingsToNVS();
 void updateLVGLState(uint8_t id, bool state);
 void updateWiFiSymbol();
 void safeSetBrightness(int target_brightness);
+void applyNewColor(lv_color_t new_color);
 void screen2_off_timer_cb(lv_timer_t *);
 void applyClockAccentColor(lv_color_t color);
 void updateMasterClockAppearance();
@@ -263,6 +300,9 @@ bool supportsPixelShift();
 bool supportsClockSaver();
 bool isPixelShiftEnabled();
 bool isClockSaverEnabled();
+bool isClockButtonEnabled();
+bool isWeatherEnabled();
+bool shouldShowClockWeather();
 int screensaverBrightness();
 int pixelShiftSafeCropInset();
 bool hasCustomWeatherLocation();
@@ -295,20 +335,76 @@ bool fetchWeatherSearchResults(
 void updateWeatherIfNeeded();
 String htmlEscape(const String &text);
 String weatherSearchDisplayName(const WeatherSearchResult &result);
+String defaultDeviceHostName();
+String defaultDeviceLabel();
+String sanitizeHostName(const String &text);
+String formattedPairingCode();
+String setupAccessPointSsid();
+String setupPortalUrl();
+String adminMdnsUrl();
+String adminDirectUrl();
+bool isPairingOnboardingActive();
+String defaultAdminSection(const String &requested_section);
+bool readStoredWifiCredentials(StoredWifiCredentials &credentials);
+bool saveStoredWifiCredentials(const StoredWifiCredentials &credentials);
+void eraseStoredWifiCredentials();
+void loadOrCreateDeviceConfig();
+void saveDeviceConfigToNVS();
+void applyBrightnessSetting(int brightness, bool persist);
+int brightnessScaleForWeb(int brightness);
+int brightnessLevelFromWebScale(int scale_value);
+bool parseHexColor(const String &text, uint32_t &color_hex);
+String colorHexCss(uint32_t color_hex);
+void applyScreen2BacklightSetting(bool enabled, bool persist);
+void applyPixelShiftSetting(bool enabled, bool persist);
+void applyClockButtonSetting(bool enabled, bool persist);
+void applyClockSaverSetting(bool enabled, bool persist);
+void applyClockSaverIdleSetting(uint32_t idle_ms, bool persist);
+void applyTimezoneSettingIndex(int index, bool persist);
+void applyWeatherEnabledSetting(bool enabled, bool persist);
+void saveCustomWeatherLocation(const String &name, float latitude, float longitude, bool persist);
+void resetCustomWeatherLocation(bool persist);
+void updateWifiSetupMessage();
+void deferWeatherRefresh(uint32_t delay_ms);
+String homeKitSetupPayload();
+String renderQrSvg(const String &payload);
 String renderWebHomePage();
+String renderAdminPage(
+    const String &message = "",
+    bool is_error = false,
+    const String &search_query = "",
+    const WeatherSearchResult *search_results = nullptr,
+    int search_result_count = 0,
+    const String &search_message = "",
+    bool search_is_error = false,
+    const String &active_section = "");
 String renderWeatherConfigPage(
     const String &message = "",
     const String &search_query = "",
     const WeatherSearchResult *search_results = nullptr,
     int search_result_count = 0,
     const String &search_message = "");
+String renderProvisioningPage(const String &message = "", bool is_error = false);
 void handleWebHome();
 void handleWeatherConfigRoot();
 void handleWeatherConfigSearch();
 void handleWeatherConfigSave();
 void handleWeatherConfigReset();
+void redirectToWeatherSection();
+void handleDisplaySettingsSave();
+void handleTimezoneSave();
+void handleDeviceConfigSave();
+void handleWifiConfigSave();
+void handleWifiReset();
+void handleHomeKitQrSvg();
 void startWeatherConfigServer();
 void ensureWeatherConfigServer();
+void handleProvisioningRoot();
+void handleProvisioningWifiScan();
+void handleProvisioningWifiSave();
+void handleProvisioningRedirect();
+void startProvisioningServer();
+void startProvisioningMode();
 void logWeatherConfigUrls();
 void hideScreensaver(bool user_wake);
 bool isSetupAccessPointVisible();
@@ -319,6 +415,7 @@ void applyTimezoneSetting(bool request_sync);
 void ensureTimeIsConfigured();
 void updateTimezoneButtonLabel();
 void updateTimezoneStatusLabel();
+void updateSettingsWebLinksLabel();
 void openTimezoneModal();
 void closeTimezoneModal();
 String weatherConfigStationUrl();
@@ -332,6 +429,8 @@ void timezone_roller_event_handler(lv_event_t *e);
 void timezone_done_event_handler(lv_event_t *e);
 void weather_setup_button_event_handler(lv_event_t *e);
 void weather_setup_done_event_handler(lv_event_t *e);
+void scheduleReboot(uint32_t delay_ms = kDeferredRebootMs);
+void processScheduledReboot();
 
 class MySwitch : public Service::Switch {
   public:
@@ -383,6 +482,21 @@ bool isPixelShiftEnabled()
 bool isClockSaverEnabled()
 {
     return supportsClockSaver() && oled_clock_saver_enabled;
+}
+
+bool isClockButtonEnabled()
+{
+    return supportsClockSaver() && clock_button_screen_enabled;
+}
+
+bool isWeatherEnabled()
+{
+    return weather_enabled && hasCustomWeatherLocation();
+}
+
+bool shouldShowClockWeather()
+{
+    return isWeatherEnabled() && weather_has_data;
 }
 
 int screensaverBrightness()
@@ -487,6 +601,9 @@ void applyClockAccentColor(lv_color_t color)
     }
     if (screensaver_center_dot) {
         lv_obj_set_style_bg_color(screensaver_center_dot, color, 0);
+    }
+    if (screensaver_weather_temp_label) {
+        lv_obj_set_style_text_color(screensaver_weather_temp_label, color, 0);
     }
     if (screensaver_weather_sun_core) {
         lv_obj_set_style_bg_color(screensaver_weather_sun_core, color, 0);
@@ -675,22 +792,46 @@ void updateTimezoneButtonLabel()
 
 String weatherConfigStationUrl()
 {
-    if (WiFi.status() != WL_CONNECTED) {
-        return String();
-    }
-
-    return String("http://") + WiFi.localIP().toString() + ":8080";
+    return adminMdnsUrl();
 }
 
 String weatherConfigApUrl()
 {
-    const wifi_mode_t wifi_mode = WiFi.getMode();
-    const bool ap_active = (wifi_mode == WIFI_MODE_AP || wifi_mode == WIFI_MODE_APSTA);
-    if (!ap_active) {
-        return String();
+    return setupPortalUrl();
+}
+
+void updateSettingsWebLinksLabel()
+{
+    if (!ui_settings_web_links_label) {
+        return;
     }
 
-    return String("http://") + WiFi.softAPIP().toString() + ":8080";
+    const String mdns_url = adminMdnsUrl();
+    const String direct_url = adminDirectUrl();
+    const String setup_url = setupPortalUrl();
+    String body;
+    body.reserve(260);
+    body += "Web UI:\n";
+
+    if (mdns_url.length() > 0) {
+        body += mdns_url;
+        body += "\n";
+    }
+    if (direct_url.length() > 0) {
+        body += "Alternative:\n";
+        body += direct_url;
+        body += "\n";
+    }
+    if (setup_url.length() > 0) {
+        body += "Setup:\n";
+        body += setup_url;
+        body += "\n";
+    }
+    if (mdns_url.length() == 0 && direct_url.length() == 0 && setup_url.length() == 0) {
+        body += "Connect Wi-Fi first.";
+    }
+
+    lv_label_set_text(ui_settings_web_links_label, body.c_str());
 }
 
 void updateWeatherSetupButtonLabel()
@@ -699,7 +840,7 @@ void updateWeatherSetupButtonLabel()
         return;
     }
 
-    lv_label_set_text(ui_weather_setup_value_label, "Weather " LV_SYMBOL_RIGHT);
+    lv_label_set_text(ui_weather_setup_value_label, "Web UI " LV_SYMBOL_RIGHT);
 }
 
 bool extractJsonNumberField(const String &json, const char *key, float &value)
@@ -891,31 +1032,37 @@ void updateWeatherSetupModalContent()
     }
 
     const String station_url = weatherConfigStationUrl();
+    const String direct_url = adminDirectUrl();
     const String ap_url = weatherConfigApUrl();
-    const String location_label = selectedWeatherLocationLabel();
     String body;
-    body.reserve(256);
-    body += "Search for a city or village, or set exact coordinates in your browser.\n\n";
-    body += "Current source\n";
-    body += location_label;
+    body.reserve(320);
+    body += "Open the admin web UI in your browser to change\n";
+    body += "device, display, time and weather settings.";
     body += "\n\n";
 
     if (station_url.length() > 0) {
-        body += "Wi-Fi\n";
+        body += "Primary URL\n";
         body += station_url;
         body += "\n\n";
     }
 
+    if (direct_url.length() > 0) {
+        body += "Alternative URL\n";
+        body += direct_url;
+        body += "\n\n";
+    }
+
     if (ap_url.length() > 0) {
-        body += "AP\n";
+        body += "Setup Portal\n";
         body += ap_url;
         body += "\n\n";
     }
 
-    if (station_url.length() == 0 && ap_url.length() == 0) {
-        body += "Connect Wi-Fi or open the setup AP first.\nThen open the device IP in your browser.";
+    if (station_url.length() == 0 && direct_url.length() == 0 && ap_url.length() == 0) {
+        body += "Connect Wi-Fi or enter setup mode first.";
     } else {
-        body += "Open the device IP in your browser, then choose Weather.";
+        body += "Use the Weather section in the admin UI to update\n";
+        body += "the clock weather monogram.";
     }
 
     lv_label_set_text(ui_weather_setup_modal_text, body.c_str());
@@ -1102,7 +1249,7 @@ void updateMasterClock(bool force)
         return;
     }
 
-    if (!weather_has_data) {
+    if (!shouldShowClockWeather()) {
         lv_obj_add_flag(master_weather_group, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -1128,7 +1275,7 @@ void updateMasterClockMode()
         return;
     }
 
-    if (isClockSaverEnabled()) {
+    if (isClockButtonEnabled()) {
         lv_obj_add_flag(ui_master_clock_info, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(ui_master_clock_button, LV_OBJ_FLAG_HIDDEN);
         updateMasterClockAppearance();
@@ -1144,7 +1291,7 @@ void updateMasterClockMode()
 void updateWeatherMonogram()
 {
     if (screensaver_weather_group && screensaver_weather_temp_label) {
-        if (!weather_has_data) {
+        if (!shouldShowClockWeather()) {
             lv_obj_add_flag(screensaver_weather_group, LV_OBJ_FLAG_HIDDEN);
         } else {
             setScreensaverWeatherGlyph(glyphForWeatherCode(weather_code, weather_is_day));
@@ -1253,11 +1400,12 @@ void ensureTimeIsConfigured()
     updateTimezoneStatusLabel();
     updateWeatherSetupButtonLabel();
     updateWeatherSetupModalContent();
+    updateSettingsWebLinksLabel();
 }
 
 bool fetchCurrentWeather()
 {
-    if (WiFi.status() != WL_CONNECTED) {
+    if (WiFi.status() != WL_CONNECTED || !isWeatherEnabled()) {
         return false;
     }
 
@@ -1323,7 +1471,7 @@ void updateWeatherIfNeeded()
     static wl_status_t last_wifi_status = WL_DISCONNECTED;
     const wl_status_t wifi_status = WiFi.status();
 
-    if (wifi_status != WL_CONNECTED) {
+    if (wifi_status != WL_CONNECTED || !isWeatherEnabled()) {
         last_wifi_status = wifi_status;
         return;
     }
@@ -1343,7 +1491,9 @@ void updateWeatherIfNeeded()
     }
 
     weather_last_request_ms = now;
-    fetchCurrentWeather();
+    if (isWeatherEnabled()) {
+        fetchCurrentWeather();
+    }
 }
 
 int parseWeatherSearchResults(const String &json, WeatherSearchResult results[], int max_results)
@@ -1537,6 +1687,38 @@ String htmlEscape(const String &text)
     return escaped;
 }
 
+String jsonEscape(const String &text)
+{
+    String escaped;
+    escaped.reserve(text.length() + 8);
+
+    for (size_t i = 0; i < text.length(); ++i) {
+        const char c = text[i];
+        switch (c) {
+        case '\\':
+            escaped += F("\\\\");
+            break;
+        case '"':
+            escaped += F("\\\"");
+            break;
+        case '\n':
+            escaped += F("\\n");
+            break;
+        case '\r':
+            escaped += F("\\r");
+            break;
+        case '\t':
+            escaped += F("\\t");
+            break;
+        default:
+            escaped += c;
+            break;
+        }
+    }
+
+    return escaped;
+}
+
 String weatherSearchDisplayName(const WeatherSearchResult &result)
 {
     String label = result.name;
@@ -1554,33 +1736,533 @@ String weatherSearchDisplayName(const WeatherSearchResult &result)
     return label;
 }
 
+String defaultDeviceHostName()
+{
+    String suffix = BRIDGE_SUFFIX_STR;
+    suffix.toLowerCase();
+    if (suffix.isEmpty()) {
+        suffix = "0000";
+    }
+    return String(kDefaultHostBase) + "-" + suffix;
+}
+
+String defaultDeviceLabel()
+{
+    if (BRIDGE_SUFFIX_STR.isEmpty()) {
+        return String("HOMEsmthng");
+    }
+    return String("HOMEsmthng ") + BRIDGE_SUFFIX_STR;
+}
+
+String sanitizeHostName(const String &text)
+{
+    String value = text;
+    value.trim();
+    value.toLowerCase();
+
+    String sanitized;
+    sanitized.reserve(value.length());
+    bool last_was_dash = false;
+
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        const bool is_alpha_numeric =
+            (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9');
+
+        if (is_alpha_numeric) {
+            sanitized += c;
+            last_was_dash = false;
+            continue;
+        }
+
+        if (!last_was_dash && sanitized.length() > 0) {
+            sanitized += '-';
+            last_was_dash = true;
+        }
+    }
+
+    while (sanitized.startsWith("-")) {
+        sanitized.remove(0, 1);
+    }
+    while (sanitized.endsWith("-")) {
+        sanitized.remove(sanitized.length() - 1);
+    }
+
+    if (sanitized.isEmpty()) {
+        return defaultDeviceHostName();
+    }
+
+    return sanitized;
+}
+
+String formattedPairingCode()
+{
+    if (HOMEKIT_PAIRING_CODE_STR.length() != 8) {
+        return HOMEKIT_PAIRING_CODE_STR;
+    }
+    return HOMEKIT_PAIRING_CODE_STR.substring(0, 4) + "-" + HOMEKIT_PAIRING_CODE_STR.substring(4, 8);
+}
+
+String setupAccessPointSsid()
+{
+    return String("homesmthng");
+}
+
+String setupPortalUrl()
+{
+    if (!provisioning_mode_active) {
+        return String();
+    }
+    return String("http://192.168.4.1");
+}
+
+String adminMdnsUrl()
+{
+    if (WiFi.status() != WL_CONNECTED || device_host_name.isEmpty()) {
+        return String();
+    }
+    return String("http://") + device_host_name + ".local:" + String(kAdminWebPort);
+}
+
+String adminDirectUrl()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        return String();
+    }
+
+    const IPAddress station_ip = WiFi.localIP();
+    if (station_ip[0] == 0 && station_ip[1] == 0 && station_ip[2] == 0 && station_ip[3] == 0) {
+        return String();
+    }
+
+    return String("http://") + station_ip.toString() + ":" + String(kAdminWebPort);
+}
+
+bool isPairingOnboardingActive()
+{
+    return homespan_started && WiFi.status() == WL_CONNECTED && !homekit_is_paired;
+}
+
+String defaultAdminSection(const String &requested_section)
+{
+    if (requested_section.length() > 0) {
+        return requested_section;
+    }
+
+    if (isPairingOnboardingActive()) {
+        return String("homekit");
+    }
+
+    return String();
+}
+
+bool readStoredWifiCredentials(StoredWifiCredentials &credentials)
+{
+    memset(&credentials, 0, sizeof(credentials));
+
+    nvs_handle handle = 0;
+    if (nvs_open(kHomeSpanWifiNamespace, NVS_READONLY, &handle) != ESP_OK) {
+        return false;
+    }
+
+    size_t len = sizeof(credentials);
+    const esp_err_t err = nvs_get_blob(handle, kHomeSpanWifiKey, &credentials, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK || len < sizeof(credentials.ssid)) {
+        memset(&credentials, 0, sizeof(credentials));
+        return false;
+    }
+
+    credentials.ssid[MAX_SSID] = '\0';
+    credentials.pwd[MAX_PWD] = '\0';
+    return strlen(credentials.ssid) > 0;
+}
+
+bool saveStoredWifiCredentials(const StoredWifiCredentials &credentials)
+{
+    nvs_handle handle = 0;
+    if (nvs_open(kHomeSpanWifiNamespace, NVS_READWRITE, &handle) != ESP_OK) {
+        return false;
+    }
+
+    const esp_err_t set_err = nvs_set_blob(handle, kHomeSpanWifiKey, &credentials, sizeof(credentials));
+    const esp_err_t commit_err = (set_err == ESP_OK) ? nvs_commit(handle) : set_err;
+    nvs_close(handle);
+    return commit_err == ESP_OK;
+}
+
+void eraseStoredWifiCredentials()
+{
+    nvs_handle handle = 0;
+    if (nvs_open(kHomeSpanWifiNamespace, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+
+    nvs_erase_key(handle, kHomeSpanWifiKey);
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void loadOrCreateDeviceConfig()
+{
+    preferences.begin("homespan", false);
+
+    String stored_host = preferences.getString("device_host", "");
+    String stored_label = preferences.getString("device_label", "");
+
+    stored_host = sanitizeHostName(stored_host);
+    if (stored_host.isEmpty()) {
+        stored_host = defaultDeviceHostName();
+    }
+
+    stored_label.trim();
+    if (stored_label.isEmpty()) {
+        stored_label = defaultDeviceLabel();
+    }
+
+    device_host_name = stored_host;
+    device_label = stored_label;
+
+    preferences.putString("device_host", device_host_name);
+    preferences.putString("device_label", device_label);
+    preferences.end();
+}
+
+void saveDeviceConfigToNVS()
+{
+    preferences.begin("homespan", false);
+    preferences.putString("device_host", device_host_name);
+    preferences.putString("device_label", device_label);
+    preferences.end();
+}
+
+void applyBrightnessSetting(int brightness, bool persist)
+{
+    global_brightness = constrain(brightness, 1, boardProfile().brightness_levels);
+    if (ui_brightness_slider) {
+        lv_slider_set_value(ui_brightness_slider, global_brightness, LV_ANIM_OFF);
+    }
+    safeSetBrightness(global_brightness);
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+int brightnessScaleForWeb(int brightness)
+{
+    const int max_level = max(1, boardProfile().brightness_levels);
+    const int clamped_brightness = constrain(brightness, 1, max_level);
+    if (max_level <= 1) {
+        return kWebBrightnessScaleMax;
+    }
+
+    return static_cast<int>(lroundf(
+        (static_cast<float>(clamped_brightness - 1) * static_cast<float>(kWebBrightnessScaleMax)) /
+        static_cast<float>(max_level - 1)));
+}
+
+int brightnessLevelFromWebScale(int scale_value)
+{
+    const int max_level = max(1, boardProfile().brightness_levels);
+    const int clamped_scale = constrain(scale_value, 0, kWebBrightnessScaleMax);
+    if (max_level <= 1) {
+        return 1;
+    }
+
+    return 1 + static_cast<int>(lroundf(
+                   (static_cast<float>(clamped_scale) * static_cast<float>(max_level - 1)) /
+                   static_cast<float>(kWebBrightnessScaleMax)));
+}
+
+bool parseHexColor(const String &text, uint32_t &color_hex)
+{
+    String value = text;
+    value.trim();
+    if (value.startsWith("#")) {
+        value.remove(0, 1);
+    }
+
+    if (value.length() != 6) {
+        return false;
+    }
+
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        const bool is_hex =
+            (c >= '0' && c <= '9') ||
+            (c >= 'a' && c <= 'f') ||
+            (c >= 'A' && c <= 'F');
+        if (!is_hex) {
+            return false;
+        }
+    }
+
+    color_hex = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 16)) & 0xFFFFFF;
+    return true;
+}
+
+String colorHexCss(uint32_t color_hex)
+{
+    char buffer[8];
+    snprintf(buffer, sizeof(buffer), "#%06lX", static_cast<unsigned long>(color_hex & 0xFFFFFF));
+    return String(buffer);
+}
+
+void applyScreen2BacklightSetting(bool enabled, bool persist)
+{
+    screen2_bl_always_on = enabled;
+    if (ui_bl_toggle) {
+        if (!enabled) {
+            lv_obj_add_state(ui_bl_toggle, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(ui_bl_toggle, LV_STATE_CHECKED);
+        }
+    }
+    syncScreen2IdleTimer();
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void applyPixelShiftSetting(bool enabled, bool persist)
+{
+    oled_pixel_shift_enabled = supportsPixelShift() && enabled;
+    if (ui_pixel_shift_toggle) {
+        if (oled_pixel_shift_enabled) {
+            lv_obj_add_state(ui_pixel_shift_toggle, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(ui_pixel_shift_toggle, LV_STATE_CHECKED);
+        }
+    }
+    if (!oled_pixel_shift_enabled) {
+        applyPixelShiftOffset(0, 0);
+    }
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void applyClockButtonSetting(bool enabled, bool persist)
+{
+    clock_button_screen_enabled = supportsClockSaver() && enabled;
+    if (ui_clock_button_toggle) {
+        if (clock_button_screen_enabled) {
+            lv_obj_add_state(ui_clock_button_toggle, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(ui_clock_button_toggle, LV_STATE_CHECKED);
+        }
+    }
+    updateMasterClockMode();
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void applyClockSaverSetting(bool enabled, bool persist)
+{
+    oled_clock_saver_enabled = supportsClockSaver() && enabled;
+    if (ui_clock_saver_toggle) {
+        if (oled_clock_saver_enabled) {
+            lv_obj_add_state(ui_clock_saver_toggle, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(ui_clock_saver_toggle, LV_STATE_CHECKED);
+        }
+    }
+    if (!oled_clock_saver_enabled) {
+        hideScreensaver(false);
+    }
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void applyClockSaverIdleSetting(uint32_t idle_ms, bool persist)
+{
+    clock_saver_idle_ms = constrain(idle_ms, kClockSaverMinIdleMs, kClockSaverMaxIdleMs);
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void applyTimezoneSettingIndex(int index, bool persist)
+{
+    timezone_index = constrain(index, 0, kNumTimezones - 1);
+    if (ui_timezone_roller) {
+        lv_roller_set_selected(ui_timezone_roller, static_cast<uint16_t>(timezone_index), LV_ANIM_OFF);
+    }
+
+    applyTimezoneSetting(true);
+    if (screensaver_visible) {
+        updateScreensaverClock(true);
+    }
+    updateMasterClock(true);
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void applyWeatherEnabledSetting(bool enabled, bool persist)
+{
+    weather_enabled = enabled;
+    if (!isWeatherEnabled()) {
+        weather_has_data = false;
+        weather_refresh_pending = false;
+    } else {
+        weather_refresh_pending = true;
+        weather_last_request_ms = 0;
+    }
+    updateWeatherMonogram();
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void deferWeatherRefresh(uint32_t delay_ms)
+{
+    weather_refresh_pending = true;
+    const uint32_t remaining_retry_ms = delay_ms < kWeatherRetryMs ? (kWeatherRetryMs - delay_ms) : 0;
+    weather_last_request_ms = millis() - remaining_retry_ms;
+}
+
+void saveCustomWeatherLocation(const String &name, float latitude, float longitude, bool persist)
+{
+    weather_use_custom_location = true;
+    weather_location_name = name.length() > 0 ? name : String("Custom location");
+    weather_custom_latitude = latitude;
+    weather_custom_longitude = longitude;
+    weather_has_data = false;
+    deferWeatherRefresh(10000);
+    updateWeatherMonogram();
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void resetCustomWeatherLocation(bool persist)
+{
+    weather_use_custom_location = false;
+    weather_location_name = "";
+    weather_custom_latitude = 0.0f;
+    weather_custom_longitude = 0.0f;
+    weather_has_data = false;
+    weather_refresh_pending = false;
+    weather_last_request_ms = millis();
+    updateWeatherMonogram();
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
+void updateWifiSetupMessage()
+{
+    if (!ui_wifi_setup_msg) {
+        return;
+    }
+
+    String body;
+    body.reserve(256);
+
+    if (provisioning_mode_active) {
+        body += "Connect to Wi-Fi hotspot\n";
+        body += setupAccessPointSsid();
+    } else if (isPairingOnboardingActive()) {
+        const String mdns_url = adminMdnsUrl();
+        const String direct_url = adminDirectUrl();
+        const String browser_url = (mdns_url.length() > 0)
+                                       ? mdns_url
+                                       : String("http://") + device_host_name + ".local:" + String(kAdminWebPort);
+        body += "Connect to your smart home\n\n";
+        body += "Open in browser\n";
+        body += browser_url;
+        if (direct_url.length() > 0) {
+            body += "\n\nAlternative\n";
+            body += direct_url;
+        }
+    } else {
+        body += "";
+    }
+
+    lv_label_set_text(ui_wifi_setup_msg, body.c_str());
+}
+
+String homeKitSetupPayload()
+{
+    HapQR qr;
+    return String(qr.get(static_cast<uint32_t>(HOMEKIT_PAIRING_CODE_STR.toInt()), kHomeKitSetupId, static_cast<uint8_t>(Category::Bridges)));
+}
+
+String renderQrSvg(const String &payload)
+{
+    if (payload.isEmpty()) {
+        return String();
+    }
+
+    const int version = qrcodegen_getMinFitVersion(qrcodegen_Ecc_MEDIUM, payload.length());
+    if (version <= 0) {
+        return String();
+    }
+
+    const size_t buffer_len = qrcodegen_BUFFER_LEN_FOR_VERSION(version);
+    std::unique_ptr<uint8_t[]> temp_buffer(new uint8_t[buffer_len]);
+    std::unique_ptr<uint8_t[]> qr_buffer(new uint8_t[buffer_len]);
+    if (!temp_buffer || !qr_buffer) {
+        return String();
+    }
+
+    if (!qrcodegen_encodeText(
+            payload.c_str(),
+            temp_buffer.get(),
+            qr_buffer.get(),
+            qrcodegen_Ecc_MEDIUM,
+            version,
+            version,
+            qrcodegen_Mask_AUTO,
+            true)) {
+        return String();
+    }
+
+    const int qr_size = qrcodegen_getSize(qr_buffer.get());
+    const int border = 4;
+    const int canvas = qr_size + border * 2;
+
+    String svg;
+    svg.reserve(6000);
+    svg += F("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    svg += "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 " + String(canvas) + " " + String(canvas) + "\" shape-rendering=\"crispEdges\">";
+    svg += F("<rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>");
+    svg += F("<path d=\"");
+
+    for (int y = 0; y < qr_size; ++y) {
+        for (int x = 0; x < qr_size; ++x) {
+            if (!qrcodegen_getModule(qr_buffer.get(), x, y)) {
+                continue;
+            }
+            svg += "M";
+            svg += String(x + border);
+            svg += " ";
+            svg += String(y + border);
+            svg += "h1v1h-1z";
+        }
+    }
+
+    svg += F("\" fill=\"#000000\"/></svg>");
+    return svg;
+}
+
 String renderWebHomePage()
 {
-    String page;
-    page.reserve(2600);
-    page += F(
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<title>HOMEsmthng</title>"
-        "<style>"
-        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0c0f10;color:#f4f4f4;margin:0;padding:24px;}"
-        ".wrap{max-width:720px;margin:0 auto;}"
-        ".card{background:#171b1d;border:1px solid #2a2f33;border-radius:18px;padding:20px;margin-bottom:18px;}"
-        "h1,h2{margin:0 0 12px 0;}p{color:#c7cccf;line-height:1.45;}"
-        ".nav{display:flex;flex-direction:column;gap:12px;}"
-        ".nav a{display:flex;justify-content:space-between;align-items:center;text-decoration:none;color:#fff;"
-        "background:#111517;border:1px solid #2a2f33;border-radius:14px;padding:16px 18px;font-size:17px;font-weight:600;}"
-        ".nav span:last-child{color:#68724D;}"
-        ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:#c7cccf;}"
-        "</style></head><body><div class=\"wrap\">"
-        "<div class=\"card\"><h1>HOMEsmthng</h1>"
-        "<p>Choose a section to configure on the device.</p></div>"
-        "<div class=\"card\"><h2>Navigation</h2><div class=\"nav\">"
-        "<a href=\"/weather\"><span>Weather</span><span>&rsaquo;</span></a>"
-        "</div></div>"
-        "<div class=\"card\"><p class=\"mono\">Open this page by entering the device IP in your browser.</p></div>"
-        "</div></body></html>");
-    return page;
+    return renderAdminPage();
 }
 
 String renderWeatherConfigPage(
@@ -1590,74 +2272,374 @@ String renderWeatherConfigPage(
     int search_result_count,
     const String &search_message)
 {
+    return renderAdminPage(message, false, search_query, search_results, search_result_count, search_message, false, "weather");
+}
+
+String renderAdminPage(
+    const String &message,
+    bool is_error,
+    const String &search_query,
+    const WeatherSearchResult *search_results,
+    int search_result_count,
+    const String &search_message,
+    bool search_is_error,
+    const String &active_section)
+{
     const WeatherLocation current_location = selectedWeatherLocation();
     const String current_label = selectedWeatherLocationLabel();
+    const bool weather_location_set = hasCustomWeatherLocation();
     String custom_name = weather_location_name;
-    if (custom_name.isEmpty()) {
-        custom_name = hasCustomWeatherLocation() ? String("Custom location") : current_label;
+    if (custom_name.length() == 0) {
+        custom_name = hasCustomWeatherLocation() ? String("Custom location") : String();
     }
+
+    StoredWifiCredentials stored_wifi = {};
+    const bool has_stored_wifi = readStoredWifiCredentials(stored_wifi);
+    const String stored_ssid = has_stored_wifi ? String(stored_wifi.ssid) : String();
+    const String mdns_url = adminMdnsUrl();
+    const String direct_url = adminDirectUrl();
+    const String setup_url = setupPortalUrl();
+    const String pairing_code = formattedPairingCode();
+    const String pairing_payload = homeKitSetupPayload();
     const String escaped_label = htmlEscape(current_label);
     const String escaped_name = htmlEscape(custom_name);
+    const String weather_search_value = search_query.length() > 0 ? search_query : (weather_location_set ? current_label : String());
+    const String escaped_weather_search_value = htmlEscape(weather_search_value);
     const String escaped_message = htmlEscape(message);
     const String escaped_search_query = htmlEscape(search_query);
     const String escaped_search_message = htmlEscape(search_message);
+    const String escaped_device_label = htmlEscape(device_label);
+    const String escaped_device_host = htmlEscape(device_host_name);
+    const String escaped_mdns_url = htmlEscape(mdns_url);
+    const String escaped_direct_url = htmlEscape(direct_url);
+    const String escaped_setup_url = htmlEscape(setup_url);
+    const String escaped_stored_ssid = htmlEscape(stored_ssid);
+    const String active_color_css = colorHexCss(active_switch_color_hex);
+    const int brightness_scale_value = brightnessScaleForWeb(global_brightness);
+    String normalized_active_section = active_section;
+    normalized_active_section.toLowerCase();
+    const bool open_homekit = normalized_active_section == "homekit";
+    const bool open_device = normalized_active_section == "device";
+    const bool open_wifi = normalized_active_section == "wifi";
+    const bool open_display = normalized_active_section == "display";
+    const bool open_time = normalized_active_section == "time";
+    const bool open_weather = normalized_active_section == "weather";
 
-    String weather_status = "Waiting for weather data";
-    if (weather_has_data) {
+    String weather_status = "Set a weather location to show weather";
+    if (!weather_enabled) {
+        weather_status = "Disabled";
+    } else if (!weather_location_set) {
+        weather_status = "No location set";
+    } else if (weather_has_data) {
         weather_status = String(weather_temperature_c) + "&deg;C &middot; " + weatherGlyphLabel(glyphForWeatherCode(weather_code, weather_is_day));
     } else if (WiFi.status() != WL_CONNECTED) {
         weather_status = "Weather fetch needs Wi-Fi";
+    } else {
+        weather_status = "Waiting for weather data";
+    }
+
+    String wifi_status = "Not connected";
+    if (WiFi.status() == WL_CONNECTED) {
+        wifi_status = WiFi.SSID();
+        if (wifi_status.length() == 0) {
+            wifi_status = "Connected";
+        }
+    } else if (has_stored_wifi) {
+        wifi_status = "Saved network: " + stored_ssid;
     }
 
     String page;
-    page.reserve(9000);
+    page.reserve(30000);
     page += F(
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<title>HOMEsmthng Weather</title>"
+        "<title>HOMEsmthng Admin</title>"
         "<style>"
-        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0c0f10;color:#f4f4f4;margin:0;padding:24px;}"
+        ":root{color-scheme:dark;--bg:#0c0f10;--surface:#171b1d;--surface-2:#111517;--border:#2a2f33;--border-strong:#40484d;--text:#f4f4f4;--muted:#c7cccf;--subtle:#98a1a6;--input:#0f1315;--primary:#68724D;--secondary:#273038;--danger:#3a2020;--msg:#1f2d24;--msg-text:#d7f2df;--error:#3a2020;--error-text:#ffd6d6;--shadow:0 18px 50px rgba(0,0,0,.22);}"
+        "@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f5f2eb;--surface:#fffdf8;--surface-2:#f4f0e7;--border:#ded8cc;--border-strong:#bdb5a6;--text:#171b1d;--muted:#4b5257;--subtle:#737b80;--input:#ffffff;--primary:#68724D;--secondary:#e8e1d3;--danger:#f2d7d4;--msg:#e4efdc;--msg-text:#28361f;--error:#f2d7d4;--error-text:#5b1e18;--shadow:0 18px 50px rgba(74,63,44,.14);}}"
+        "*{transition:background-color .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;}"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:radial-gradient(circle at top left,color-mix(in srgb,var(--primary) 18%,transparent),transparent 34rem),var(--bg);color:var(--text);margin:0;padding:24px;}"
         ".wrap{max-width:720px;margin:0 auto;}"
-        ".card{background:#171b1d;border:1px solid #2a2f33;border-radius:18px;padding:20px;margin-bottom:18px;}"
-        "h1,h2{margin:0 0 12px 0;}p{color:#c7cccf;line-height:1.45;}"
+        ".card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:18px;box-shadow:0 0 0 rgba(0,0,0,0);}"
+        ".card:hover{border-color:var(--border-strong);box-shadow:var(--shadow);transform:translateY(-1px);}"
+        "h1,h2{margin:0 0 12px 0;}p{color:var(--muted);line-height:1.45;}"
         "label{display:block;margin:14px 0 6px 0;font-weight:600;}"
-        "input{width:100%;box-sizing:border-box;border-radius:12px;border:1px solid #30363b;background:#0f1315;color:#fff;padding:14px;font-size:16px;}"
+        "input,select{width:100%;box-sizing:border-box;border-radius:12px;border:1px solid var(--border-strong);background:var(--input);color:var(--text);padding:14px;font-size:16px;}"
+        "input:hover,select:hover{border-color:var(--primary);}input:focus,select:focus,button:focus-visible,summary:focus-visible{outline:2px solid color-mix(in srgb,var(--primary) 70%,white);outline-offset:2px;}"
         ".row{display:flex;gap:12px;flex-wrap:wrap;}.row > div{flex:1 1 220px;}"
         ".actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px;}"
         "button{border:0;border-radius:999px;padding:12px 18px;font-size:15px;font-weight:600;cursor:pointer;}"
-        ".primary{background:#68724D;color:#fff;}.secondary{background:#273038;color:#fff;}.danger{background:#3a2020;color:#fff;}"
-        ".msg{margin-bottom:16px;padding:12px 14px;border-radius:12px;background:#1f2d24;color:#d7f2df;}"
+        "button:hover{transform:translateY(-1px);filter:brightness(1.08);}button:active{transform:translateY(0) scale(.98);}"
+        ".primary{background:var(--primary);color:#fff;}.secondary{background:var(--secondary);color:var(--text);}.danger{background:var(--danger);color:var(--text);}"
+        ".msg{margin-bottom:16px;padding:12px 14px;border-radius:12px;background:var(--msg);color:var(--msg-text);}"
+        ".msg.error{background:var(--error);color:var(--error-text);}"
         ".search-results{display:flex;flex-direction:column;gap:10px;margin-top:16px;}"
         ".result-form{margin:0;}"
-        ".result-btn{width:100%;text-align:left;background:#111517;border:1px solid #2a2f33;border-radius:14px;padding:14px 16px;color:#fff;}"
+        ".result-btn{width:100%;text-align:left;background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:14px 16px;color:var(--text);}"
+        ".result-btn:hover{border-color:var(--primary);box-shadow:0 10px 24px color-mix(in srgb,var(--primary) 16%,transparent);}"
         ".result-title{display:block;font-size:16px;font-weight:700;margin-bottom:4px;}"
-        ".result-meta{display:block;color:#c7cccf;font-size:14px;line-height:1.35;}"
-        ".subtle{color:#98a1a6;font-size:14px;}"
-        ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:#c7cccf;}"
-        ".toplink{display:inline-block;margin-bottom:14px;color:#c7cccf;text-decoration:none;}"
-        "</style></head><body><div class=\"wrap\">"
-        "<a class=\"toplink\" href=\"/\">&lsaquo; Home</a>"
-        "<div class=\"card\"><h1>Weather Location</h1>"
-        "<p>Set the exact location used for the clock weather monogram. Timezone stays separate and still controls the clock time.</p>");
+        ".result-meta{display:block;color:var(--muted);font-size:14px;line-height:1.35;}"
+        ".location-search{display:flex;gap:10px;align-items:stretch;}"
+        ".location-search input{flex:1 1 auto;min-width:0;}"
+        ".pin-btn{flex:0 0 54px;border-radius:12px;padding:0;background:var(--secondary);color:var(--text);display:flex;align-items:center;justify-content:center;}"
+        ".pin-btn svg{width:20px;height:20px;display:block;}"
+        ".manual-location{margin-top:20px;border:1px solid var(--border);border-radius:14px;background:var(--surface-2);overflow:hidden;}"
+        ".manual-location summary{padding:14px 16px;font-size:16px;font-weight:700;}"
+        ".manual-location .manual-body{padding:0 16px 16px 16px;border-top:1px solid var(--border);}"
+        ".hidden-form{display:none;}"
+        ".weather-location-hint{display:none;margin-top:10px;padding:10px 12px;border-radius:12px;background:var(--error);color:var(--error-text);font-size:14px;line-height:1.4;}"
+        ".weather-location-hint.show{display:block;}"
+        ".subtle{color:var(--subtle);font-size:14px;}"
+        ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:var(--muted);overflow-wrap:anywhere;word-break:break-word;}"
+        ".status{display:grid;grid-template-columns:minmax(140px,180px) 1fr;gap:8px 12px;}"
+        ".status strong{color:var(--text);}"
+        ".status span{min-width:0;overflow-wrap:anywhere;word-break:break-word;}"
+        ".status-link{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border-strong);}"
+        ".status-link:hover{color:var(--primary);border-color:var(--primary);}"
+        ".pairing-code{color:var(--text);}"
+        ".checkbox-label{display:flex;align-items:center;gap:10px;margin:10px 0;font-weight:500;}"
+        ".checkbox-label input{width:auto;flex:0 0 auto;padding:0;margin:0;}"
+        ".toggle-item{margin:12px 0 16px 0;}"
+        ".toggle-item .subtle{margin:2px 0 0 0;}"
+        ".toggle-item .checkbox-label + .subtle{margin-left:34px;}"
+        ".qr{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;}"
+        ".qr img{width:220px;height:220px;background:#fff;border-radius:18px;padding:10px;box-sizing:border-box;}"
+        ".stepper{display:flex;gap:10px;align-items:center;}"
+        ".stepper input{flex:1 1 auto;margin:0;}"
+        ".step-btn{min-width:52px;padding:12px 0;line-height:1;font-size:22px;}"
+        ".color-picker-wrap{position:relative;}"
+        "input[type=\"color\"]{appearance:none;-webkit-appearance:none;padding:6px;height:58px;background:transparent;cursor:pointer;}"
+        "input[type=\"color\"]::-webkit-color-swatch-wrapper{padding:0;}"
+        "input[type=\"color\"]::-webkit-color-swatch{border:1px solid var(--border-strong);border-radius:10px;}"
+        "input[type=\"color\"]::-moz-color-swatch{border:1px solid var(--border-strong);border-radius:10px;}"
+        ".color-picker-plus{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;"
+        "font-size:34px;font-weight:500;color:var(--text);text-shadow:0 1px 4px var(--bg),0 0 10px var(--bg);}"
+        ".swatches{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;}"
+        ".swatch{width:42px;height:42px;border-radius:999px;border:2px solid var(--border-strong);padding:0;background-clip:padding-box;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18);}"
+        ".swatch:hover{transform:translateY(-2px) scale(1.04);box-shadow:0 8px 18px rgba(0,0,0,.18);}"
+        ".swatch.active{border-color:var(--text);}"
+        ".section-card{padding:0;overflow:hidden;}"
+        ".section-card summary{list-style:none;cursor:pointer;padding:20px;font-size:18px;font-weight:700;}"
+        ".section-card summary:hover{background:color-mix(in srgb,var(--primary) 10%,transparent);}"
+        ".section-card summary::-webkit-details-marker{display:none;}"
+        ".section-card summary::after{content:'›';float:right;color:var(--subtle);transition:transform .2s ease;}"
+        ".section-card[open] summary::after{transform:rotate(90deg);}"
+        ".section-body{padding:0 20px 20px 20px;border-top:1px solid var(--border);}"
+        "@media(max-width:520px){body{padding:14px;}.card{padding:16px;}.status{grid-template-columns:1fr;gap:4px;}.status strong{margin-top:8px;}}"
+        "</style></head><body><div class=\"wrap\">");
 
     if (message.length() > 0) {
-        page += "<div class=\"msg\">" + escaped_message + "</div>";
+        page += "<div class=\"msg";
+        if (is_error) {
+            page += " error";
+        }
+        page += "\">" + escaped_message + "</div>";
     }
 
-    page += "<p><strong>Current source:</strong> " + escaped_label + "<br>";
-    page += "<strong>Coordinates:</strong> <span class=\"mono\">" + String(current_location.latitude, 6) + ", " + String(current_location.longitude, 6) + "</span><br>";
-    page += "<strong>Current weather:</strong> " + weather_status + "</p></div>";
+    page += "<div class=\"card\"><h1>" + escaped_device_label + "</h1>";
+    page += "<p>Admin UI for device setup, Wi-Fi, display settings, weather and Apple Home.</p>";
+    page += "<div class=\"status\">";
+    page += "<strong>Hostname</strong><span class=\"mono\">" + escaped_device_host + ".local</span>";
+    page += "<strong>Wi-Fi</strong><span>" + htmlEscape(wifi_status) + "</span>";
+    if (mdns_url.length() > 0) {
+        page += "<strong>Primary URL</strong><span class=\"mono\">" + escaped_mdns_url + "</span>";
+    }
+    if (direct_url.length() > 0) {
+        page += "<strong>Alternative URL</strong><span class=\"mono\">" + escaped_direct_url + "</span>";
+    }
+    if (setup_url.length() > 0) {
+        page += "<strong>Setup Portal</strong><span class=\"mono\">" + escaped_setup_url + "</span>";
+    }
+    page += "<strong>HomeKit</strong><span><a class=\"status-link\" href=\"/?section=homekit\">";
+    page += homekit_is_paired ? String("Paired") : String("Not paired yet");
+    page += "</a></span>";
+    page += "</div></div>";
 
-    page += F("<div class=\"card\"><h2>Find City or Village</h2>"
-              "<p>Search for a place name and save the matching coordinates directly.</p>"
-              "<form method=\"GET\" action=\"/weather/search\">"
-              "<label for=\"query\">Place name</label>");
-    page += "<input id=\"query\" name=\"query\" value=\"" + escaped_search_query + "\" placeholder=\"e.g. Berlin, Tegernsee, Winterberg\">";
+    page += "<details class=\"card section-card\"";
+    if (open_homekit) {
+        page += " open";
+    }
+    page += F("><summary>Apple Home</summary><div class=\"section-body\">");
+    if (homekit_is_paired) {
+        page += F("<p>The accessory is already paired to Apple Home. Remove it from the Home app if you want to pair again.</p>");
+    } else {
+        page += F("<p>Open the Home app and scan this QR code, or enter the pairing code manually.</p>");
+        page += F("<div class=\"qr\">");
+        page += "<img src=\"/homekit/qr.svg\" alt=\"HomeKit QR code\">";
+        page += "<div><p><strong>Pairing code</strong><br><span class=\"mono pairing-code\">" + htmlEscape(pairing_code) + "</span></p>";
+        page += "<p><strong>Setup payload</strong><br><span class=\"mono\">" + htmlEscape(pairing_payload) + "</span></p></div>";
+        page += F("</div>");
+    }
+    page += F("</div></details>");
+
+    page += "<details class=\"card section-card\"";
+    if (open_device) {
+        page += " open";
+    }
+    page += F("><summary>Device</summary><div class=\"section-body\">"
+              "<p>Change the local device label and the mDNS hostname. A reboot is required so Bonjour and the web UI stay consistent.</p>"
+              "<form method=\"POST\" action=\"/device/save\">"
+              "<input type=\"hidden\" name=\"section\" value=\"device\">"
+              "<label for=\"device_label\">Device label</label>");
+    page += "<input id=\"device_label\" name=\"device_label\" value=\"" + escaped_device_label + "\" maxlength=\"48\">";
+    page += F("<label for=\"device_host\">Hostname</label>");
+    page += "<input id=\"device_host\" name=\"device_host\" value=\"" + escaped_device_host + "\" maxlength=\"48\" spellcheck=\"false\">";
+    page += F("<p class=\"subtle\">Allowed characters: lowercase letters, numbers and hyphens. If you install multiple devices, give each one a distinct hostname.</p>"
+              "<div class=\"actions\"><button class=\"primary\" type=\"submit\">Save and reboot</button></div>"
+              "</form></div></details>");
+
+    page += "<details class=\"card section-card\"";
+    if (open_wifi) {
+        page += " open";
+    }
+    page += F("><summary>Wi-Fi</summary><div class=\"section-body\">"
+              "<p>Update the stored Wi-Fi credentials or reset the device back into setup mode.</p>"
+              "<form method=\"POST\" action=\"/wifi/save\">"
+              "<input type=\"hidden\" name=\"section\" value=\"wifi\">"
+              "<label for=\"wifi_ssid\">Wi-Fi network</label>");
+    page += "<input id=\"wifi_ssid\" name=\"ssid\" value=\"" + escaped_stored_ssid + "\" maxlength=\"32\" spellcheck=\"false\" autocapitalize=\"none\" autocomplete=\"username\">";
+    page += F("<label for=\"wifi_pwd\">Wi-Fi password</label>"
+              "<input id=\"wifi_pwd\" name=\"pwd\" type=\"password\" value=\"\" maxlength=\"64\" placeholder=\"Enter a new password only if it changed\" autocomplete=\"current-password\" autocapitalize=\"none\" spellcheck=\"false\">"
+              "<p class=\"subtle\">Saving Wi-Fi restarts the device. Leaving the password empty keeps the current password for the same SSID, or uses an open network for a new SSID.</p>"
+              "<div class=\"actions\"><button class=\"primary\" type=\"submit\">Save Wi-Fi and reboot</button></div>"
+              "</form>"
+              "<form method=\"POST\" action=\"/wifi/reset\" class=\"actions\">"
+              "<input type=\"hidden\" name=\"section\" value=\"wifi\">"
+              "<button class=\"danger\" type=\"submit\">Reset Wi-Fi and enter setup mode</button>"
+              "</form></div></details>");
+
+    page += "<details class=\"card section-card\"";
+    if (open_display) {
+        page += " open";
+    }
+    page += F("><summary>Appearance &amp; Display</summary><div class=\"section-body\">"
+              "<form method=\"POST\" action=\"/settings/display\">"
+              "<input type=\"hidden\" name=\"section\" value=\"display\">"
+              "<input type=\"hidden\" name=\"color_idx\" id=\"color_idx\" value=\"\">"
+              "<div class=\"row\"><div><label for=\"brightness_scale\">Display Brightness</label>"
+              "<div class=\"stepper\">"
+              "<button class=\"secondary step-btn\" type=\"button\" onclick=\"adjustBrightness(-1)\" aria-label=\"Dunkler\">&#8722;</button>");
+    page += "<input id=\"brightness_scale\" name=\"brightness_scale\" type=\"number\" min=\"0\" max=\"" + String(kWebBrightnessScaleMax) +
+            "\" step=\"1\" value=\"" + String(brightness_scale_value) + "\">";
+    page += F("<button class=\"secondary step-btn\" type=\"button\" onclick=\"adjustBrightness(1)\" aria-label=\"Heller\">+</button>"
+              "</div>");
+    page += F("<p class=\"subtle\">Use a simple scale from 0 (darkest) to 10 (brightest).</p>"
+              "</div><div><label for=\"color_picker\">Switch ON Color</label>");
+    page += "<div class=\"color-picker-wrap\"><input class=\"color-input\" id=\"color_picker\" name=\"color_picker\" type=\"color\" value=\"" + active_color_css + "\">";
+    page += F("<span class=\"color-picker-plus\" aria-hidden=\"true\">+</span></div>"
+              "<p class=\"subtle\">Tap the color field or choose a quick preset.</p>"
+              "<div class=\"swatches\">");
+    for (int i = 0; i < kNumColors; ++i) {
+        const String preset_color_css = colorHexCss(kColorHexOptions[i]);
+        page += "<button class=\"swatch";
+        if (kColorHexOptions[i] == active_switch_color_hex) {
+            page += " active";
+        }
+        page += "\" type=\"button\" title=\"" + htmlEscape(kColorLabels[i]) + "\" data-preset-index=\"" + String(i) + "\"";
+        page += " data-color=\"" + preset_color_css + "\"";
+        page += " style=\"background:" + preset_color_css + ";\"";
+        page += " onclick=\"setPresetColor('" + preset_color_css + "', " + String(i) + ")\"></button>";
+    }
+    page += F("</div><label for=\"color_hex\">Hex Color</label>");
+    page += "<input id=\"color_hex\" name=\"color_hex\" value=\"" + active_color_css + "\" maxlength=\"7\" spellcheck=\"false\">";
+    page += F("<p class=\"subtle\">Enter a value like #68724D.</p></div></div>");
+    page += F("<div class=\"checkboxes\">");
+    page += "<div class=\"toggle-item\"><label class=\"checkbox-label\"><input type=\"checkbox\" name=\"screen2_auto_off\"";
+    if (!screen2_bl_always_on) {
+        page += " checked";
+    }
+    page += ">Allow Screen 2 to turn off after inactivity</label>";
+    page += F("<p class=\"subtle\">Lets Screen 2 go dark after a short idle time, so the display does not keep glowing in dark rooms, especially on non-OLED panels. When disabled, Screen 2 stays lit.</p></div>");
+    page += "<div class=\"toggle-item\"><label class=\"checkbox-label\"><input type=\"checkbox\" name=\"px_shift\"";
+    if (oled_pixel_shift_enabled) {
+        page += " checked";
+    }
+    page += ">Pixel Shift</label>";
+    page += F("<p class=\"subtle\">Moves the UI by a few pixels every so often. This helps reduce uneven OLED aging and image retention on static screens.</p></div>");
+    page += "<div class=\"toggle-item\"><label class=\"checkbox-label\"><input type=\"checkbox\" name=\"clock_btn\"";
+    if (clock_button_screen_enabled) {
+        page += " checked";
+    }
+    page += ">Clock Button Screen</label>";
+    page += F("<p class=\"subtle\">Shows the separate full-screen clock button page below the large single-button screen.</p></div>");
+    page += "<div class=\"toggle-item\"><label class=\"checkbox-label\"><input type=\"checkbox\" name=\"clock_sv\"";
+    if (oled_clock_saver_enabled) {
+        page += " checked";
+    }
+    page += ">Idle Clock Saver</label>";
+    page += F("<p class=\"subtle\">After inactivity, the interface switches to the analog clock screensaver. This is independent from the clock button page.</p></div>");
+    page += F("<div class=\"toggle-item\"><label for=\"clock_idle_s\">Standby time</label>");
+    page += "<input id=\"clock_idle_s\" name=\"clock_idle_s\" type=\"number\" min=\"10\" max=\"3600\" step=\"5\" value=\"" + String(clock_saver_idle_ms / 1000UL) + "\">";
+    page += F("<p class=\"subtle\">Seconds of inactivity before the idle clock saver appears.</p></div>");
+    page += F("</div><div class=\"actions\"><button class=\"primary\" type=\"submit\">Save display settings</button></div></form></div></details>");
+
+    page += "<details class=\"card section-card\"";
+    if (open_time) {
+        page += " open";
+    }
+    page += F("><summary>Time</summary><div class=\"section-body\">"
+              "<form method=\"POST\" action=\"/settings/time\">"
+              "<input type=\"hidden\" name=\"section\" value=\"time\">"
+              "<label for=\"tz_idx\">Timezone</label>"
+              "<select id=\"tz_idx\" name=\"tz_idx\">");
+    for (int i = 0; i < kNumTimezones; ++i) {
+        page += "<option value=\"" + String(i) + "\"";
+        if (i == timezone_index) {
+            page += " selected";
+        }
+        page += ">" + htmlEscape(kTimezoneLabels[i]) + "</option>";
+    }
+    page += F("</select><div class=\"actions\"><button class=\"primary\" type=\"submit\">Save timezone</button></div></form></div></details>");
+
+    page += "<details class=\"card section-card\"";
+    if (open_weather) {
+        page += " open";
+    }
+    page += F(" id=\"weather-section\"><summary>Weather</summary><div class=\"section-body\">");
+    if (weather_location_set) {
+        page += F("<form method=\"POST\" action=\"/weather/save#weather-section\">"
+                  "<input type=\"hidden\" name=\"section\" value=\"weather\">"
+                  "<input type=\"hidden\" name=\"weather_visibility\" value=\"1\">");
+        page += "<input type=\"hidden\" name=\"name\" value=\"" + escaped_label + "\">";
+        page += "<input type=\"hidden\" name=\"latitude\" value=\"" + String(weather_custom_latitude, 6) + "\">";
+        page += "<input type=\"hidden\" name=\"longitude\" value=\"" + String(weather_custom_longitude, 6) + "\">";
+        page += F("<div class=\"toggle-item\"><label class=\"checkbox-label\"><input type=\"checkbox\" name=\"weather_enabled\"");
+        if (weather_enabled) {
+            page += " checked";
+        }
+        page += F(">Show weather on clock views</label>"
+                  "<p class=\"subtle\">Applies to both the idle clock saver and the clock button screen. Setting a location turns this on automatically.</p></div>");
+        page += F("<div class=\"actions\"><button class=\"secondary\" type=\"submit\">Save weather visibility</button></div>");
+        page += F("</form>");
+    }
+    page += "<p><strong>Weather:</strong> " + String(weather_enabled ? "Enabled" : "Disabled") + "<br>";
+    page += "<strong>Current source:</strong> " + String(weather_location_set ? escaped_label : "No location set") + "<br>";
+    if (weather_location_set) {
+        page += "<strong>Coordinates:</strong> <span class=\"mono\">" + String(weather_custom_latitude, 6) + ", " + String(weather_custom_longitude, 6) + "</span><br>";
+    }
+    page += "<strong>Current weather:</strong> " + weather_status + "</p>";
+    page += F("<form method=\"GET\" action=\"/weather/search#weather-section\">"
+              "<input type=\"hidden\" name=\"section\" value=\"weather\">"
+              "<label for=\"query\">Find city or village</label>");
+    page += "<div class=\"location-search\"><input id=\"query\" name=\"query\" value=\"" + escaped_weather_search_value + "\" placeholder=\"e.g. Berlin, Tegernsee, Winterberg\">";
+    page += F("<button class=\"pin-btn\" type=\"button\" title=\"Use current browser location\" aria-label=\"Use current browser location\" onclick=\"useBrowserLocation(true)\">"
+              "<svg viewBox=\"0 0 384 512\" aria-hidden=\"true\" focusable=\"false\"><path fill=\"currentColor\" d=\"M192 0C86 0 0 86 0 192c0 77 27 99 172 310 10 14 30 14 40 0 145-211 172-233 172-310C384 86 298 0 192 0zm0 272a80 80 0 1 1 0-160 80 80 0 0 1 0 160z\"/></svg>"
+              "</button></div><div id=\"location_permission_hint\" class=\"weather-location-hint\"></div>");
     page += F("<div class=\"actions\"><button class=\"primary\" type=\"submit\">Search place</button></div></form>");
-    page += F("<p class=\"subtle\">Search uses Open-Meteo geocoding and needs an active Wi-Fi internet connection.</p>");
+    page += F("<form id=\"browser_location_form\" class=\"hidden-form\" method=\"POST\" action=\"/weather/save#weather-section\">"
+              "<input type=\"hidden\" name=\"section\" value=\"weather\">"
+              "<input type=\"hidden\" id=\"browser_location_name\" name=\"name\" value=\"Browser location\">"
+              "<input type=\"hidden\" id=\"browser_latitude\" name=\"latitude\" value=\"\">"
+              "<input type=\"hidden\" id=\"browser_longitude\" name=\"longitude\" value=\"\">"
+              "</form>"
+              "<p class=\"subtle\">Search uses Open-Meteo geocoding and needs an active Wi-Fi internet connection. Tap the pin to use this browser's current location.</p>");
 
     if (search_message.length() > 0) {
-        page += "<div class=\"msg\">" + escaped_search_message + "</div>";
+        page += "<div class=\"msg";
+        if (search_is_error) {
+            page += " error";
+        }
+        page += "\">" + escaped_search_message + "</div>";
     }
 
     if (search_results && search_result_count > 0) {
@@ -1671,7 +2653,8 @@ String renderWeatherConfigPage(
             const String escaped_display_name = htmlEscape(display_name);
             const String escaped_result_name = htmlEscape(display_name);
 
-            page += F("<form method=\"POST\" action=\"/weather/save\" class=\"result-form\">");
+            page += F("<form method=\"POST\" action=\"/weather/save#weather-section\" class=\"result-form\">");
+            page += F("<input type=\"hidden\" name=\"section\" value=\"weather\">");
             page += "<input type=\"hidden\" name=\"name\" value=\"" + escaped_result_name + "\">";
             page += "<input type=\"hidden\" name=\"latitude\" value=\"" + String(search_results[i].latitude, 6) + "\">";
             page += "<input type=\"hidden\" name=\"longitude\" value=\"" + String(search_results[i].longitude, 6) + "\">";
@@ -1684,39 +2667,110 @@ String renderWeatherConfigPage(
         page += F("</div>");
     }
 
-    page += F("</div>");
-
-    page += F("<div class=\"card\"><h2>Custom Location</h2>"
-              "<form method=\"POST\" action=\"/weather/save\">"
+    page += F("<details class=\"manual-location\"><summary>Manual coordinates</summary><div class=\"manual-body\">"
+              "<form method=\"POST\" action=\"/weather/save#weather-section\">"
+              "<input type=\"hidden\" name=\"section\" value=\"weather\">"
+              "<p class=\"subtle\">Advanced: enter exact coordinates manually. Saving coordinates turns weather on automatically.</p>"
               "<label for=\"name\">Location name</label>");
     page += "<input id=\"name\" name=\"name\" value=\"" + escaped_name + "\" placeholder=\"e.g. Munich Home\">";
     page += F("<div class=\"row\"><div><label for=\"latitude\">Latitude</label>");
-    page += "<input id=\"latitude\" name=\"latitude\" value=\"" + String(hasCustomWeatherLocation() ? weather_custom_latitude : current_location.latitude, 6) + "\" inputmode=\"decimal\">";
+    page += "<input id=\"latitude\" name=\"latitude\" value=\"" + String(weather_location_set ? String(weather_custom_latitude, 6) : String()) + "\" inputmode=\"decimal\">";
     page += F("</div><div><label for=\"longitude\">Longitude</label>");
-    page += "<input id=\"longitude\" name=\"longitude\" value=\"" + String(hasCustomWeatherLocation() ? weather_custom_longitude : current_location.longitude, 6) + "\" inputmode=\"decimal\">";
+    page += "<input id=\"longitude\" name=\"longitude\" value=\"" + String(weather_location_set ? String(weather_custom_longitude, 6) : String()) + "\" inputmode=\"decimal\">";
     page += F("</div></div><div class=\"actions\">"
               "<button class=\"primary\" type=\"submit\">Save location</button>"
-              "<button class=\"secondary\" type=\"button\" onclick=\"useBrowserLocation()\">Use current browser location</button>"
-              "</div></form>");
+              "<button class=\"secondary\" type=\"button\" onclick=\"useBrowserLocation(false)\">Fill with browser location</button>"
+              "</div></form></div></details>");
 
-    page += F("<form method=\"POST\" action=\"/weather/reset\" class=\"actions\">"
-              "<button class=\"danger\" type=\"submit\">Use timezone city instead</button>"
-              "</form></div>");
-
-    page += F("<div class=\"card\"><h2>How it works</h2>"
-              "<p>The weather API uses the saved coordinates. If no custom location is set, the firmware falls back to the currently selected timezone city.</p>"
-              "<p class=\"mono\">Open the device IP in your browser, then choose Weather.</p></div>");
+    page += F("<form method=\"POST\" action=\"/weather/reset#weather-section\" class=\"actions\">"
+              "<input type=\"hidden\" name=\"section\" value=\"weather\">"
+              "<button class=\"danger\" type=\"submit\">Clear weather location</button>"
+              "</form></div></details>");
 
     page += F("<script>"
-              "function useBrowserLocation(){"
-              "if(!navigator.geolocation){alert('Geolocation is not supported by this browser.');return;}"
+              "function normalizeHexColor(value){"
+              "let hex=(value||'').trim().toUpperCase();"
+              "if(!hex.startsWith('#')){hex='#'+hex;}"
+              "return /^#[0-9A-F]{6}$/.test(hex)?hex:'';"
+              "}"
+              "function updatePresetSelection(hex,presetIndex){"
+              "document.querySelectorAll('.swatch').forEach(btn=>btn.classList.remove('active'));"
+              "if(typeof presetIndex==='number'&&presetIndex>=0){"
+              "const preset=document.querySelector('.swatch[data-preset-index=\"'+presetIndex+'\"]');"
+              "if(preset){preset.classList.add('active');}"
+              "return;"
+              "}"
+              "const normalized=normalizeHexColor(hex);"
+              "if(!normalized){return;}"
+              "document.querySelectorAll('.swatch').forEach(btn=>{"
+              "if(normalizeHexColor(btn.dataset.color)===normalized){btn.classList.add('active');}"
+              "});"
+              "}"
+              "function setPresetColor(color,index){"
+              "document.getElementById('color_picker').value=color;"
+              "document.getElementById('color_hex').value=color.toUpperCase();"
+              "document.getElementById('color_idx').value=String(index);"
+              "updatePresetSelection(color,index);"
+              "}"
+              "function adjustBrightness(delta){"
+              "const input=document.getElementById('brightness_scale');"
+              "if(!input){return;}"
+              "const min=parseInt(input.min||'0',10);"
+              "const max=parseInt(input.max||'10',10);"
+              "const current=parseInt(input.value||'0',10);"
+              "const next=Math.min(max,Math.max(min,(isNaN(current)?min:current)+delta));"
+              "input.value=String(next);"
+              "}"
+              "function showLocationHint(message){"
+              "const hint=document.getElementById('location_permission_hint');"
+              "if(hint){hint.textContent=message;hint.classList.add('show');}"
+              "else{alert(message);}"
+              "}"
+              "function useBrowserLocation(saveImmediately){"
+              "if(window.isSecureContext===false){"
+              "showLocationHint('Browser location is blocked because this page is opened over HTTP. Safari only asks for location permission on secure pages. Please search for your place manually.');"
+              "return;"
+              "}"
+              "if(!navigator.geolocation){showLocationHint('Geolocation is not supported by this browser. Please search for your place manually.');return;}"
               "navigator.geolocation.getCurrentPosition(function(pos){"
-              "document.getElementById('latitude').value=pos.coords.latitude.toFixed(6);"
-              "document.getElementById('longitude').value=pos.coords.longitude.toFixed(6);"
+              "const hint=document.getElementById('location_permission_hint');"
+              "if(hint){hint.classList.remove('show');}"
+              "const lat=pos.coords.latitude.toFixed(6);"
+              "const lon=pos.coords.longitude.toFixed(6);"
+              "if(saveImmediately){"
+              "document.getElementById('browser_latitude').value=lat;"
+              "document.getElementById('browser_longitude').value=lon;"
+              "document.getElementById('browser_location_form').submit();"
+              "return;"
+              "}"
+              "document.getElementById('latitude').value=lat;"
+              "document.getElementById('longitude').value=lon;"
               "const name=document.getElementById('name');"
               "if(!name.value){name.value='Browser location';}"
-              "},function(err){alert('Unable to read your location: '+err.message);},{enableHighAccuracy:true,timeout:10000,maximumAge:60000});"
+              "},function(err){showLocationHint('Unable to read your location: '+err.message);},{enableHighAccuracy:true,timeout:10000,maximumAge:60000});"
               "}"
+              "document.addEventListener('DOMContentLoaded',function(){"
+              "const picker=document.getElementById('color_picker');"
+              "const hex=document.getElementById('color_hex');"
+              "const preset=document.getElementById('color_idx');"
+              "if(picker&&hex){"
+              "picker.addEventListener('input',function(){"
+              "hex.value=picker.value.toUpperCase();"
+              "preset.value='';"
+              "updatePresetSelection(picker.value,-1);"
+              "});"
+              "hex.addEventListener('input',function(){"
+              "const normalized=normalizeHexColor(hex.value);"
+              "preset.value='';"
+              "if(normalized){picker.value=normalized;updatePresetSelection(normalized,-1);}"
+              "});"
+              "}"
+              "const params=new URLSearchParams(window.location.search);"
+              "const weather=document.getElementById('weather-section');"
+              "if(weather&&(window.location.pathname.indexOf('/weather')===0||params.get('section')==='weather'||window.location.hash==='#weather-section')){"
+              "setTimeout(function(){weather.scrollIntoView({block:'start'});},50);"
+              "}"
+              "});"
               "</script></div></body></html>");
 
     return page;
@@ -1724,12 +2778,12 @@ String renderWeatherConfigPage(
 
 void handleWebHome()
 {
-    weather_config_server.send(200, "text/html; charset=utf-8", renderWebHomePage());
+    weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("", false, "", nullptr, 0, "", false, defaultAdminSection(weather_config_server.arg("section"))));
 }
 
 void handleWeatherConfigRoot()
 {
-    weather_config_server.send(200, "text/html; charset=utf-8", renderWeatherConfigPage());
+    weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("", false, "", nullptr, 0, "", false, defaultAdminSection(weather_config_server.arg("section"))));
 }
 
 void handleWeatherConfigSearch()
@@ -1741,7 +2795,7 @@ void handleWeatherConfigSearch()
         weather_config_server.send(
             400,
             "text/html; charset=utf-8",
-            renderWeatherConfigPage("", query, nullptr, 0, "Please enter at least 2 characters."));
+            renderAdminPage("", false, query, nullptr, 0, "Please enter at least 2 characters.", true, "weather"));
         return;
     }
 
@@ -1757,11 +2811,19 @@ void handleWeatherConfigSearch()
     weather_config_server.send(
         200,
         "text/html; charset=utf-8",
-        renderWeatherConfigPage("", query, success ? results : nullptr, success ? result_count : 0, page_message));
+        renderAdminPage("", false, query, success ? results : nullptr, success ? result_count : 0, page_message, !success, "weather"));
+}
+
+void redirectToWeatherSection()
+{
+    weather_config_server.sendHeader("Location", "/?section=weather#weather-section", true);
+    weather_config_server.send(303, "text/plain; charset=utf-8", "Returning to Weather settings...");
 }
 
 void handleWeatherConfigSave()
 {
+    const bool visibility_only = weather_config_server.hasArg("weather_visibility");
+    const bool next_weather_enabled = visibility_only ? weather_config_server.hasArg("weather_enabled") : true;
     float latitude = 0.0f;
     float longitude = 0.0f;
     const String latitude_arg = weather_config_server.arg("latitude");
@@ -1769,44 +2831,163 @@ void handleWeatherConfigSave()
 
     if (!parseFloatParameter(latitude_arg, latitude) || !parseFloatParameter(longitude_arg, longitude) ||
         !isValidWeatherCoordinates(latitude, longitude)) {
-        weather_config_server.send(400, "text/html; charset=utf-8", renderWeatherConfigPage("Please enter valid latitude and longitude values."));
+        if (visibility_only && !next_weather_enabled) {
+            applyWeatherEnabledSetting(false, true);
+            weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Weather disabled.", false, "", nullptr, 0, "", false, "weather"));
+            return;
+        }
+        if (visibility_only) {
+            weather_config_server.send(400, "text/html; charset=utf-8", renderAdminPage("Set a weather location before enabling weather.", true, "", nullptr, 0, "", false, "weather"));
+            return;
+        }
+        weather_config_server.send(400, "text/html; charset=utf-8", renderAdminPage("Please enter valid latitude and longitude values.", true, "", nullptr, 0, "", false, "weather"));
         return;
     }
 
     String location_name = weather_config_server.arg("name");
     location_name.trim();
-    if (location_name.isEmpty()) {
+    if (location_name.length() == 0) {
         location_name = "Custom location";
     }
 
-    weather_use_custom_location = true;
-    weather_location_name = location_name;
-    weather_custom_latitude = latitude;
-    weather_custom_longitude = longitude;
-    weather_has_data = false;
-    weather_refresh_pending = true;
-    weather_last_request_ms = 0;
-    updateWeatherMonogram();
+    applyWeatherEnabledSetting(next_weather_enabled, false);
+    saveCustomWeatherLocation(location_name, latitude, longitude, false);
     saveSettingsToNVS();
-    fetchCurrentWeather();
-
-    weather_config_server.send(200, "text/html; charset=utf-8", renderWeatherConfigPage("Custom weather location saved."));
+    redirectToWeatherSection();
 }
 
 void handleWeatherConfigReset()
 {
-    weather_use_custom_location = false;
-    weather_location_name = "";
-    weather_custom_latitude = 0.0f;
-    weather_custom_longitude = 0.0f;
-    weather_has_data = false;
-    weather_refresh_pending = true;
-    weather_last_request_ms = 0;
-    updateWeatherMonogram();
+    resetCustomWeatherLocation(false);
+    applyWeatherEnabledSetting(false, false);
     saveSettingsToNVS();
-    fetchCurrentWeather();
+    redirectToWeatherSection();
+}
 
-    weather_config_server.send(200, "text/html; charset=utf-8", renderWeatherConfigPage("Weather location reset to timezone city."));
+void handleDisplaySettingsSave()
+{
+    uint32_t next_color_hex = active_switch_color_hex;
+    const String color_hex_arg = weather_config_server.arg("color_hex");
+    const String color_picker_arg = weather_config_server.arg("color_picker");
+
+    if (color_hex_arg.length() > 0) {
+        if (!parseHexColor(color_hex_arg, next_color_hex)) {
+            weather_config_server.send(
+                400,
+                "text/html; charset=utf-8",
+                renderAdminPage("Please enter a valid hex color like #68724D.", true, "", nullptr, 0, "", false, "display"));
+            return;
+        }
+    } else if (!parseHexColor(color_picker_arg, next_color_hex)) {
+        int color_index = weather_config_server.arg("color_idx").toInt();
+        if (color_index < 0 || color_index >= kNumColors) {
+            color_index = 0;
+            for (int i = 0; i < kNumColors; ++i) {
+                if (kColorHexOptions[i] == active_switch_color_hex) {
+                    color_index = i;
+                    break;
+                }
+            }
+        }
+        next_color_hex = kColorHexOptions[color_index];
+    }
+
+    active_switch_color_hex = next_color_hex;
+    applyNewColor(lv_color_hex(active_switch_color_hex));
+    const int brightness_scale = weather_config_server.hasArg("brightness_scale")
+                                     ? weather_config_server.arg("brightness_scale").toInt()
+                                     : brightnessScaleForWeb(global_brightness);
+    applyBrightnessSetting(brightnessLevelFromWebScale(brightness_scale), false);
+    applyScreen2BacklightSetting(!weather_config_server.hasArg("screen2_auto_off"), false);
+    applyPixelShiftSetting(weather_config_server.hasArg("px_shift"), false);
+    applyClockButtonSetting(weather_config_server.hasArg("clock_btn"), false);
+    applyClockSaverSetting(weather_config_server.hasArg("clock_sv"), false);
+    long clock_idle_seconds_arg = weather_config_server.hasArg("clock_idle_s")
+                                      ? weather_config_server.arg("clock_idle_s").toInt()
+                                      : static_cast<long>(clock_saver_idle_ms / 1000UL);
+    if (clock_idle_seconds_arg < 0) {
+        clock_idle_seconds_arg = 0;
+    }
+    const uint32_t clock_idle_seconds = static_cast<uint32_t>(clock_idle_seconds_arg);
+    applyClockSaverIdleSetting(clock_idle_seconds * 1000UL, false);
+    saveSettingsToNVS();
+
+    weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Display settings saved.", false, "", nullptr, 0, "", false, "display"));
+}
+
+void handleTimezoneSave()
+{
+    const int requested_timezone = weather_config_server.arg("tz_idx").toInt();
+    if (requested_timezone < 0 || requested_timezone >= kNumTimezones) {
+        weather_config_server.send(400, "text/html; charset=utf-8", renderAdminPage("Please choose a valid timezone.", true, "", nullptr, 0, "", false, "time"));
+        return;
+    }
+
+    applyTimezoneSettingIndex(requested_timezone, true);
+    weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Timezone saved.", false, "", nullptr, 0, "", false, "time"));
+}
+
+void handleDeviceConfigSave()
+{
+    String next_label = weather_config_server.arg("device_label");
+    next_label.trim();
+    if (next_label.length() == 0) {
+        next_label = defaultDeviceLabel();
+    }
+
+    device_label = next_label;
+    device_host_name = sanitizeHostName(weather_config_server.arg("device_host"));
+    saveDeviceConfigToNVS();
+    scheduleReboot();
+
+    weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Device settings saved. Rebooting now.", false, "", nullptr, 0, "", false, "device"));
+}
+
+void handleWifiConfigSave()
+{
+    String ssid = weather_config_server.arg("ssid");
+    ssid.trim();
+    if (ssid.length() == 0) {
+        weather_config_server.send(400, "text/html; charset=utf-8", renderAdminPage("Please enter a Wi-Fi network name.", true, "", nullptr, 0, "", false, "wifi"));
+        return;
+    }
+
+    String password = weather_config_server.arg("pwd");
+    StoredWifiCredentials existing_credentials = {};
+    const bool has_existing_credentials = readStoredWifiCredentials(existing_credentials);
+    if (password.length() == 0 && has_existing_credentials && ssid == String(existing_credentials.ssid)) {
+        password = String(existing_credentials.pwd);
+    }
+
+    StoredWifiCredentials credentials = {};
+    snprintf(credentials.ssid, sizeof(credentials.ssid), "%s", ssid.c_str());
+    snprintf(credentials.pwd, sizeof(credentials.pwd), "%s", password.c_str());
+
+    if (!saveStoredWifiCredentials(credentials)) {
+        weather_config_server.send(500, "text/html; charset=utf-8", renderAdminPage("Unable to save Wi-Fi credentials.", true, "", nullptr, 0, "", false, "wifi"));
+        return;
+    }
+
+    scheduleReboot();
+    weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Wi-Fi saved. Rebooting now.", false, "", nullptr, 0, "", false, "wifi"));
+}
+
+void handleWifiReset()
+{
+    eraseStoredWifiCredentials();
+    scheduleReboot();
+    weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Wi-Fi reset. Rebooting into setup mode.", false, "", nullptr, 0, "", false, "wifi"));
+}
+
+void handleHomeKitQrSvg()
+{
+    const String svg = renderQrSvg(homeKitSetupPayload());
+    if (svg.length() == 0) {
+        weather_config_server.send(500, "text/plain; charset=utf-8", "Unable to render QR code.");
+        return;
+    }
+
+    weather_config_server.send(200, "image/svg+xml", svg);
 }
 
 void startWeatherConfigServer()
@@ -1820,59 +3001,303 @@ void startWeatherConfigServer()
     weather_config_server.on("/weather/search", HTTP_GET, handleWeatherConfigSearch);
     weather_config_server.on("/weather/save", HTTP_POST, handleWeatherConfigSave);
     weather_config_server.on("/weather/reset", HTTP_POST, handleWeatherConfigReset);
+    weather_config_server.on("/settings/display", HTTP_POST, handleDisplaySettingsSave);
+    weather_config_server.on("/settings/time", HTTP_POST, handleTimezoneSave);
+    weather_config_server.on("/device/save", HTTP_POST, handleDeviceConfigSave);
+    weather_config_server.on("/wifi/save", HTTP_POST, handleWifiConfigSave);
+    weather_config_server.on("/wifi/reset", HTTP_POST, handleWifiReset);
+    weather_config_server.on("/homekit/qr.svg", HTTP_GET, handleHomeKitQrSvg);
     weather_config_server_routes_registered = true;
 }
 
 void ensureWeatherConfigServer()
 {
-    if (weather_config_server_running || !weather_config_server_routes_registered) {
+    if (weather_config_server_running || !weather_config_server_routes_registered || provisioning_mode_active) {
         return;
     }
 
-    bool can_start = false;
-
-    if (WiFi.status() == WL_CONNECTED) {
-        const IPAddress station_ip = WiFi.localIP();
-        can_start = station_ip[0] != 0 || station_ip[1] != 0 || station_ip[2] != 0 || station_ip[3] != 0;
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
     }
 
-    if (!can_start) {
-        const wifi_mode_t wifi_mode = WiFi.getMode();
-        const bool ap_active = (wifi_mode == WIFI_MODE_AP || wifi_mode == WIFI_MODE_APSTA);
-        if (ap_active) {
-            const IPAddress ap_ip = WiFi.softAPIP();
-            can_start = ap_ip[0] != 0 || ap_ip[1] != 0 || ap_ip[2] != 0 || ap_ip[3] != 0;
-        }
-    }
-
+    const IPAddress station_ip = WiFi.localIP();
+    const bool can_start = station_ip[0] != 0 || station_ip[1] != 0 || station_ip[2] != 0 || station_ip[3] != 0;
     if (!can_start) {
         return;
     }
 
     weather_config_server.begin();
     weather_config_server_running = true;
-    Serial.println("Weather config server started");
+    Serial.println("Admin web UI started");
+}
+
+void handleProvisioningRoot()
+{
+    provisioning_server.send(200, "text/html; charset=utf-8", renderProvisioningPage());
+}
+
+void handleProvisioningWifiScan()
+{
+    if (!provisioning_mode_active) {
+        provisioning_server.send(503, "application/json; charset=utf-8", "[]");
+        return;
+    }
+
+    WiFi.scanDelete();
+    const int network_count = WiFi.scanNetworks(false, true);
+    String json = "[";
+    String unique_ssids[24];
+    int unique_count = 0;
+
+    for (int i = 0; i < network_count && unique_count < 24; ++i) {
+        const String ssid = WiFi.SSID(i);
+        if (ssid.length() == 0) {
+            continue;
+        }
+
+        bool duplicate = false;
+        for (int j = 0; j < unique_count; ++j) {
+            if (unique_ssids[j] == ssid) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+
+        unique_ssids[unique_count++] = ssid;
+        if (json.length() > 1) {
+            json += ",";
+        }
+        json += "{\"ssid\":\"";
+        json += jsonEscape(ssid);
+        json += "\",\"rssi\":";
+        json += String(WiFi.RSSI(i));
+        json += ",\"secure\":";
+        json += (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "false" : "true";
+        json += "}";
+    }
+    json += "]";
+
+    provisioning_server.send(200, "application/json; charset=utf-8", json);
+}
+
+void handleProvisioningWifiSave()
+{
+    String ssid = provisioning_server.arg("ssid");
+    ssid.trim();
+    if (ssid.length() == 0) {
+        provisioning_server.send(400, "text/html; charset=utf-8", renderProvisioningPage("Please choose a Wi-Fi network.", true));
+        return;
+    }
+
+    String next_label = provisioning_server.arg("device_label");
+    next_label.trim();
+    if (next_label.length() == 0) {
+        next_label = defaultDeviceLabel();
+    }
+
+    device_label = next_label;
+    device_host_name = sanitizeHostName(provisioning_server.arg("device_host"));
+    saveDeviceConfigToNVS();
+
+    StoredWifiCredentials credentials = {};
+    const String password = provisioning_server.arg("pwd");
+    snprintf(credentials.ssid, sizeof(credentials.ssid), "%s", ssid.c_str());
+    snprintf(credentials.pwd, sizeof(credentials.pwd), "%s", password.c_str());
+
+    if (!saveStoredWifiCredentials(credentials)) {
+        provisioning_server.send(500, "text/html; charset=utf-8", renderProvisioningPage("Unable to save Wi-Fi credentials.", true));
+        return;
+    }
+
+    scheduleReboot();
+    provisioning_server.send(200, "text/html; charset=utf-8", renderProvisioningPage("Wi-Fi saved. The device is rebooting now."));
+}
+
+void handleProvisioningRedirect()
+{
+    provisioning_server.sendHeader("Location", setupPortalUrl(), true);
+    provisioning_server.send(302, "text/plain", "");
+}
+
+String renderProvisioningPage(const String &message, bool is_error)
+{
+    const String escaped_message = htmlEscape(message);
+    const String escaped_label = htmlEscape(device_label);
+    const String escaped_host = htmlEscape(device_host_name);
+    const String escaped_ssid = htmlEscape(setupAccessPointSsid());
+    String page;
+    page.reserve(9000);
+    page += F(
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>HOMEsmthng Setup</title>"
+        "<style>"
+        ":root{color-scheme:dark;--bg:#0c0f10;--surface:#171b1d;--surface-2:#111517;--border:#2a2f33;--border-strong:#40484d;--text:#f4f4f4;--muted:#c7cccf;--subtle:#98a1a6;--input:#0f1315;--primary:#68724D;--secondary:#273038;--msg:#1f2d24;--msg-text:#d7f2df;--error:#3a2020;--error-text:#ffd6d6;--shadow:0 18px 50px rgba(0,0,0,.22);}"
+        "@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f5f2eb;--surface:#fffdf8;--surface-2:#f4f0e7;--border:#ded8cc;--border-strong:#bdb5a6;--text:#171b1d;--muted:#4b5257;--subtle:#737b80;--input:#ffffff;--primary:#68724D;--secondary:#e8e1d3;--msg:#e4efdc;--msg-text:#28361f;--error:#f2d7d4;--error-text:#5b1e18;--shadow:0 18px 50px rgba(74,63,44,.14);}}"
+        "*{transition:background-color .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;}"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:radial-gradient(circle at top left,color-mix(in srgb,var(--primary) 18%,transparent),transparent 34rem),var(--bg);color:var(--text);margin:0;padding:24px;}"
+        ".wrap{max-width:720px;margin:0 auto;}"
+        ".card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:18px;box-shadow:0 0 0 rgba(0,0,0,0);}"
+        ".card:hover{border-color:var(--border-strong);box-shadow:var(--shadow);transform:translateY(-1px);}"
+        "h1,h2{margin:0 0 12px 0;}p{color:var(--muted);line-height:1.45;}"
+        "label{display:block;margin:14px 0 6px 0;font-weight:600;}"
+        "input{width:100%;box-sizing:border-box;border-radius:12px;border:1px solid var(--border-strong);background:var(--input);color:var(--text);padding:14px;font-size:16px;}"
+        "input:hover{border-color:var(--primary);}input:focus,button:focus-visible{outline:2px solid color-mix(in srgb,var(--primary) 70%,white);outline-offset:2px;}"
+        ".actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px;}"
+        "button{border:0;border-radius:999px;padding:12px 18px;font-size:15px;font-weight:600;cursor:pointer;}"
+        "button:hover{transform:translateY(-1px);filter:brightness(1.08);}button:active{transform:translateY(0) scale(.98);}"
+        ".primary{background:var(--primary);color:#fff;}.secondary{background:var(--secondary);color:var(--text);}"
+        ".msg{margin-bottom:16px;padding:12px 14px;border-radius:12px;background:var(--msg);color:var(--msg-text);}"
+        ".msg.error{background:var(--error);color:var(--error-text);}"
+        ".subtle{color:var(--subtle);font-size:14px;}"
+        ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:var(--muted);overflow-wrap:anywhere;word-break:break-word;}"
+        ".scan-results{display:flex;flex-direction:column;gap:8px;margin-top:10px;}"
+        ".scan-item{display:flex;justify-content:space-between;gap:12px;background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:12px 14px;color:var(--text);}"
+        ".scan-item:hover{border-color:var(--primary);box-shadow:0 10px 24px color-mix(in srgb,var(--primary) 16%,transparent);transform:translateY(-1px);}"
+        ".scan-panel{margin:8px 0 14px 0;border:1px solid var(--border);border-radius:14px;background:var(--surface-2);overflow:hidden;}"
+        ".scan-panel summary{list-style:none;cursor:pointer;padding:12px 14px;color:var(--subtle);font-size:14px;font-weight:600;}"
+        ".scan-panel summary:hover{color:var(--text);background:color-mix(in srgb,var(--primary) 10%,transparent);}"
+        ".scan-panel summary::-webkit-details-marker{display:none;}"
+        ".scan-panel summary::after{content:'›';float:right;transition:transform .18s ease;}"
+        ".scan-panel[open] summary::after{transform:rotate(90deg);}"
+        ".scan-panel[open] summary{border-bottom:1px solid var(--border);}"
+        "@media(max-width:520px){body{padding:14px;}.card{padding:16px;}.scan-item{flex-direction:column;}}"
+        "</style></head><body><div class=\"wrap\">"
+        "<div class=\"card\"><h1>HOMEsmthng Setup</h1>"
+        "<p>Connect this device to your home Wi-Fi. After saving the network, the device restarts and the admin UI moves to the local network.</p>"
+        "<p><strong>Setup Wi-Fi</strong><br><span class=\"mono\">");
+    page += escaped_ssid;
+    page += F("</span><br><strong>Portal</strong><br><span class=\"mono\">http://192.168.4.1</span></p></div>");
+
+    if (message.length() > 0) {
+        page += "<div class=\"msg";
+        if (is_error) {
+            page += " error";
+        }
+        page += "\">" + escaped_message + "</div>";
+    }
+
+    page += F("<div id=\"wifi-setup\" class=\"card\"><h2>Provision Device</h2>"
+              "<form method=\"POST\" action=\"/wifi/save\">"
+              "<label for=\"device_label\">Device label</label>");
+    page += "<input id=\"device_label\" name=\"device_label\" value=\"" + escaped_label + "\" maxlength=\"48\">";
+    page += F("<label for=\"device_host\">Hostname</label>");
+    page += "<input id=\"device_host\" name=\"device_host\" value=\"" + escaped_host + "\" maxlength=\"48\" spellcheck=\"false\">";
+    page += F("<p class=\"subtle\">Each device should have its own hostname, for example <span class=\"mono\">homesmthng-abcd</span>.</p>");
+    page += F(
+        "<label for=\"ssid\">Wi-Fi network</label>"
+              "<input id=\"ssid\" name=\"ssid\" list=\"ssid-list\" placeholder=\"Choose or type a Wi-Fi network\" maxlength=\"32\" required spellcheck=\"false\" autocapitalize=\"none\" autocomplete=\"username\">"
+              "<datalist id=\"ssid-list\"></datalist>"
+              "<details id=\"scan-panel\" class=\"scan-panel\"><summary id=\"scan-summary\">Scan networks</summary><div id=\"scan-results\" class=\"scan-results\"></div></details>"
+              "<label for=\"pwd\">Wi-Fi password</label>"
+              "<input id=\"pwd\" name=\"pwd\" type=\"password\" maxlength=\"64\" placeholder=\"Leave empty only for open networks\" autocomplete=\"current-password\" autocapitalize=\"none\" spellcheck=\"false\">"
+              "<div class=\"actions\">"
+              "<button class=\"primary\" type=\"submit\">Save Wi-Fi and reboot</button>"
+              "</div></form>"
+              "</div>"
+              "<script>"
+              "let scanRunning=false;"
+              "async function refreshNetworks(){"
+              "if(scanRunning){return;}"
+              "scanRunning=true;"
+              "const list=document.getElementById('ssid-list');"
+              "const panel=document.getElementById('scan-panel');"
+              "const summary=document.getElementById('scan-summary');"
+              "const results=document.getElementById('scan-results');"
+              "summary.textContent='Scanning networks...';"
+              "list.innerHTML='';results.innerHTML='<div class=\"scan-item\"><span>Scanning Wi-Fi networks...</span></div>';"
+              "try{const response=await fetch('/wifi/scan',{cache:'no-store'});"
+              "const items=await response.json();"
+              "results.innerHTML='';"
+              "summary.textContent=items.length?('Scanned networks ('+items.length+')'):'Scanned networks';"
+              "if(!items.length){results.innerHTML='<div class=\"scan-item\"><span>No Wi-Fi networks found.</span></div>';return;}"
+              "items.forEach(item=>{"
+              "const option=document.createElement('option');option.value=item.ssid;list.appendChild(option);"
+              "const row=document.createElement('button');row.type='button';row.className='scan-item';"
+              "row.innerHTML='<span>'+item.ssid+'</span><span>'+item.rssi+' dBm'+(item.secure?' · secured':' · open')+'</span>';"
+              "row.onclick=()=>{document.getElementById('ssid').value=item.ssid;panel.open=false;summary.textContent='Selected: '+item.ssid;document.getElementById('pwd').focus();};"
+              "results.appendChild(row);"
+              "});"
+              "}catch(err){summary.textContent='Scan networks';results.innerHTML='<div class=\"scan-item\"><span>Wi-Fi scan failed. Try again.</span></div>';}"
+              "finally{scanRunning=false;}}"
+              "document.addEventListener('DOMContentLoaded',()=>{const target=document.getElementById('wifi-setup');if(target){setTimeout(()=>target.scrollIntoView({block:'start'}),150);}});"
+              "document.addEventListener('DOMContentLoaded',()=>{const panel=document.getElementById('scan-panel');if(panel){panel.addEventListener('toggle',()=>{if(panel.open){refreshNetworks();}});}});"
+              "</script></div></body></html>");
+    return page;
+}
+
+void startProvisioningServer()
+{
+    if (!provisioning_server_routes_registered) {
+        provisioning_server.on("/", HTTP_GET, handleProvisioningRoot);
+        provisioning_server.on("/wifi/scan", HTTP_GET, handleProvisioningWifiScan);
+        provisioning_server.on("/wifi/save", HTTP_POST, handleProvisioningWifiSave);
+        provisioning_server.on("/generate_204", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/gen_204", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/success.txt", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/redirect", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/canonical.html", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/library/test/success.html", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/hotspot-detect.html", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/connecttest.txt", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/ncsi.txt", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.on("/fwlink", HTTP_GET, handleProvisioningRedirect);
+        provisioning_server.onNotFound(handleProvisioningRedirect);
+        provisioning_server_routes_registered = true;
+    }
+
+    if (provisioning_server_running) {
+        return;
+    }
+
+    const IPAddress ap_ip(192, 168, 4, 1);
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAPConfig(ap_ip, ap_ip, IPAddress(255, 255, 255, 0));
+    WiFi.softAP(setupAccessPointSsid().c_str());
+    provisioning_dns_server.start(53, "*", ap_ip);
+    provisioning_server.begin();
+    provisioning_server_running = true;
+    provisioning_mode_active = true;
+    setWifiSetupInfoVisible(true, true);
+    updateWiFiSymbol();
+}
+
+void startProvisioningMode()
+{
+    startProvisioningServer();
 }
 
 void logWeatherConfigUrls()
 {
-    static String last_station_url;
-    static String last_ap_url;
+    static String last_mdns_url;
+    static String last_direct_url;
+    static String last_setup_url;
 
-    const String station_url = weatherConfigStationUrl();
-    const String ap_url = weatherConfigApUrl();
+    const String mdns_url = adminMdnsUrl();
+    const String direct_url = adminDirectUrl();
+    const String setup_url = setupPortalUrl();
 
-    if (station_url != last_station_url) {
-        last_station_url = station_url;
-        if (station_url.length() > 0) {
-            Serial.printf("Weather config UI (Wi-Fi): %s\n", station_url.c_str());
+    if (mdns_url != last_mdns_url) {
+        last_mdns_url = mdns_url;
+        if (mdns_url.length() > 0) {
+            Serial.printf("Admin UI (mDNS): %s\n", mdns_url.c_str());
         }
     }
 
-    if (ap_url != last_ap_url) {
-        last_ap_url = ap_url;
-        if (ap_url.length() > 0) {
-            Serial.printf("Weather config UI (AP): %s\n", ap_url.c_str());
+    if (direct_url != last_direct_url) {
+        last_direct_url = direct_url;
+        if (direct_url.length() > 0) {
+            Serial.printf("Admin UI (IP): %s\n", direct_url.c_str());
+        }
+    }
+
+    if (setup_url != last_setup_url) {
+        last_setup_url = setup_url;
+        if (setup_url.length() > 0) {
+            Serial.printf("Setup portal: %s\n", setup_url.c_str());
         }
     }
 }
@@ -1970,15 +3395,7 @@ void hideScreensaver(bool user_wake)
 
 bool isSetupAccessPointVisible()
 {
-    if (homespan_setup_ap_active) {
-        return true;
-    }
-
-    const wifi_mode_t wifi_mode = WiFi.getMode();
-    const bool ap_mode_active = (wifi_mode == WIFI_MODE_AP || wifi_mode == WIFI_MODE_APSTA);
-    const IPAddress ap_ip = WiFi.softAPIP();
-    const bool ap_ip_valid = (ap_ip[0] != 0 || ap_ip[1] != 0 || ap_ip[2] != 0 || ap_ip[3] != 0);
-    return ap_mode_active || ap_ip_valid;
+    return provisioning_mode_active;
 }
 
 void setWifiSetupInfoVisible(bool visible, bool force_main_tile)
@@ -1992,10 +3409,14 @@ void setWifiSetupInfoVisible(bool visible, bool force_main_tile)
     }
 
     if (visible == wifi_setup_info_visible) {
+        if (visible) {
+            updateWifiSetupMessage();
+        }
         return;
     }
 
     if (visible) {
+        updateWifiSetupMessage();
         lv_obj_clear_flag(ui_wifi_setup_msg, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < kNumUiSwitches; ++i) {
             if (ui_switch_buttons[i]) {
@@ -2017,20 +3438,13 @@ void setWifiSetupInfoVisible(bool visible, bool force_main_tile)
 void homeSpanStatusCallback(HS_STATUS status)
 {
     switch (status) {
-    case HS_AP_STARTED:
-    case HS_AP_CONNECTED:
-        homespan_setup_ap_active = true;
-        setWifiSetupInfoVisible(true, true);
-        lv_timer_handler();
-        break;
-    case HS_AP_TERMINATED:
-    case HS_WIFI_CONNECTING:
-    case HS_WIFI_SCANNING:
     case HS_PAIRING_NEEDED:
+        homekit_is_paired = false;
+        updateWiFiSymbol();
+        break;
     case HS_PAIRED:
-    case HS_ETH_CONNECTING:
-        homespan_setup_ap_active = false;
-        setWifiSetupInfoVisible(false, false);
+        homekit_is_paired = true;
+        updateWiFiSymbol();
         break;
     default:
         break;
@@ -2066,7 +3480,7 @@ void updateOledProtection()
     }
 
     if (isClockSaverEnabled()) {
-        if (!screensaver_visible && !suppress_screensaver && inactive_time >= kClockSaverIdleMs) {
+        if (!screensaver_visible && !suppress_screensaver && inactive_time >= clock_saver_idle_ms) {
             showScreensaver();
             last_clock_update = now;
         }
@@ -2109,17 +3523,16 @@ void screen2_off_timer_cb(lv_timer_t *)
 
 void updateWiFiSymbol()
 {
-    if (!ui_wifi_label) {
+    if (!ui_wifi_label || !tileview) {
         return;
     }
 
     const wl_status_t wifiStatus = WiFi.status();
-    const wifi_mode_t wifiMode = WiFi.getMode();
-    const bool showSetupInfo = isSetupAccessPointVisible() && wifiStatus != WL_CONNECTED;
+    const bool showSetupInfo = provisioning_mode_active || isPairingOnboardingActive();
     static wl_status_t lastStatus = WL_DISCONNECTED;
-    static wifi_mode_t lastMode = WIFI_MODE_NULL;
+    static bool lastSetupInfo = false;
 
-    if (wifiStatus != lastStatus || wifiMode != lastMode) {
+    if (wifiStatus != lastStatus || showSetupInfo != lastSetupInfo) {
         if (wifiStatus == WL_CONNECTED) {
             lv_label_set_text(ui_wifi_label, LV_SYMBOL_WIFI);
             lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_GREEN), 0);
@@ -2131,14 +3544,14 @@ void updateWiFiSymbol()
             lv_obj_set_style_text_color(ui_wifi_label, lv_palette_main(LV_PALETTE_RED), 0);
         }
         lastStatus = wifiStatus;
-        lastMode = wifiMode;
+        lastSetupInfo = showSetupInfo;
     }
 
     const lv_obj_t *current_tile = lv_tileview_get_tile_act(tileview);
 
-    if (current_tile == tileMain || current_tile == tileSecond) {
-        setWifiSetupInfoVisible(showSetupInfo, false);
-    } else if (!showSetupInfo) {
+    if (showSetupInfo) {
+        setWifiSetupInfoVisible(true, current_tile != tileMain);
+    } else {
         setWifiSetupInfoVisible(false, false);
     }
 
@@ -2196,6 +3609,9 @@ void applyNewColor(lv_color_t new_color)
         lv_obj_set_style_bg_color(ui_big_button, active_switch_color, LV_STATE_CHECKED);
         lv_obj_set_style_bg_color(ui_big_button, active_switch_color, LV_STATE_CHECKED | LV_STATE_PRESSED);
     }
+    if (ui_brightness_slider) {
+        lv_obj_set_style_bg_color(ui_brightness_slider, active_switch_color, LV_PART_INDICATOR);
+    }
 
     if (ui_timezone_value_label) {
         lv_obj_set_style_text_color(ui_timezone_value_label, active_switch_color, 0);
@@ -2223,9 +3639,13 @@ void saveSettingsToNVS()
     preferences.begin("homespan", false);
     preferences.putInt("brightness", global_brightness);
     preferences.putUInt("color_hex", active_switch_color_hex);
+    preferences.putBool("screen2_bl", screen2_bl_always_on);
     preferences.putBool("px_shift", oled_pixel_shift_enabled);
+    preferences.putBool("clock_btn", clock_button_screen_enabled);
     preferences.putBool("clock_sv", oled_clock_saver_enabled);
+    preferences.putUInt("clock_idle", clock_saver_idle_ms);
     preferences.putInt("tz_idx", timezone_index);
+    preferences.putBool("wx_enabled", weather_enabled);
     preferences.putBool("wx_custom", weather_use_custom_location);
     preferences.putString("wx_name", weather_location_name);
     preferences.putFloat("wx_lat", weather_custom_latitude);
@@ -2236,13 +3656,16 @@ void saveSettingsToNVS()
 void loadSettingsFromNVS()
 {
     preferences.begin("homespan", true);
-    global_brightness = preferences.getInt("brightness", 12);
-    active_switch_color_hex = preferences.getUInt("color_hex", 0x68724D);
-    oled_pixel_shift_enabled =
-        preferences.getBool("px_shift", boardProfile().display_backend != DisplayBackendKind::TrgbPanel && supportsPixelShift());
-    oled_clock_saver_enabled =
-        preferences.getBool("clock_sv", boardProfile().display_backend != DisplayBackendKind::TrgbPanel && supportsClockSaver());
+    const int default_brightness = brightnessLevelFromWebScale(kDefaultBrightnessScale);
+    global_brightness = preferences.getInt("brightness", default_brightness);
+    active_switch_color_hex = preferences.getUInt("color_hex", kDefaultColorHex);
+    screen2_bl_always_on = preferences.getBool("screen2_bl", true);
+    oled_pixel_shift_enabled = preferences.getBool("px_shift", false);
+    oled_clock_saver_enabled = preferences.getBool("clock_sv", supportsClockSaver());
+    clock_button_screen_enabled = preferences.getBool("clock_btn", supportsClockSaver());
+    clock_saver_idle_ms = preferences.getUInt("clock_idle", kClockSaverIdleMs);
     timezone_index = preferences.getInt("tz_idx", kDefaultTimezoneIndex);
+    weather_enabled = preferences.getBool("wx_enabled", true);
     weather_use_custom_location = preferences.getBool("wx_custom", false);
     weather_location_name = preferences.getString("wx_name", "");
     weather_custom_latitude = preferences.getFloat("wx_lat", 0.0f);
@@ -2259,10 +3682,13 @@ void loadSettingsFromNVS()
     }
     if (!supportsClockSaver()) {
         oled_clock_saver_enabled = false;
+        clock_button_screen_enabled = false;
     }
+    clock_saver_idle_ms = constrain(clock_saver_idle_ms, kClockSaverMinIdleMs, kClockSaverMaxIdleMs);
     if (!hasCustomWeatherLocation()) {
         weather_use_custom_location = false;
         weather_location_name = "";
+        weather_has_data = false;
     }
 
     active_switch_color = lv_color_hex(active_switch_color_hex);
@@ -2310,9 +3736,7 @@ void brightness_slider_event_cb(lv_event_t *e)
         return;
     }
 
-    global_brightness = static_cast<int>(lv_slider_get_value(lv_event_get_target(e)));
-    safeSetBrightness(global_brightness);
-    saveSettingsToNVS();
+    applyBrightnessSetting(static_cast<int>(lv_slider_get_value(lv_event_get_target(e))), true);
 }
 
 void color_button_event_handler(lv_event_t *e)
@@ -2340,8 +3764,7 @@ void bl_toggle_event_handler(lv_event_t *e)
         return;
     }
 
-    screen2_bl_always_on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
-    syncScreen2IdleTimer();
+    applyScreen2BacklightSetting(!lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED), true);
 }
 
 void oled_pixel_shift_toggle_event_handler(lv_event_t *e)
@@ -2350,11 +3773,16 @@ void oled_pixel_shift_toggle_event_handler(lv_event_t *e)
         return;
     }
 
-    oled_pixel_shift_enabled = supportsPixelShift() && lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
-    if (!oled_pixel_shift_enabled) {
-        applyPixelShiftOffset(0, 0);
+    applyPixelShiftSetting(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED), true);
+}
+
+void clock_button_toggle_event_handler(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) {
+        return;
     }
-    saveSettingsToNVS();
+
+    applyClockButtonSetting(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED), true);
 }
 
 void oled_clock_saver_toggle_event_handler(lv_event_t *e)
@@ -2363,12 +3791,7 @@ void oled_clock_saver_toggle_event_handler(lv_event_t *e)
         return;
     }
 
-    oled_clock_saver_enabled = supportsClockSaver() && lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
-    if (!oled_clock_saver_enabled) {
-        hideScreensaver(false);
-    }
-    updateMasterClockMode();
-    saveSettingsToNVS();
+    applyClockSaverSetting(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED), true);
 }
 
 void timezone_button_event_handler(lv_event_t *e)
@@ -2386,12 +3809,7 @@ void timezone_roller_event_handler(lv_event_t *e)
         return;
     }
 
-    timezone_index = static_cast<int>(lv_roller_get_selected(lv_event_get_target(e)));
-    applyTimezoneSetting(true);
-    if (screensaver_visible) {
-        updateScreensaverClock(true);
-    }
-    updateMasterClock(true);
+    applyTimezoneSettingIndex(static_cast<int>(lv_roller_get_selected(lv_event_get_target(e))), false);
 }
 
 void timezone_done_event_handler(lv_event_t *e)
@@ -2498,6 +3916,24 @@ void loadOrCreatePairingCode()
     preferences.end();
 }
 
+void scheduleReboot(uint32_t delay_ms)
+{
+    reboot_scheduled = true;
+    reboot_scheduled_at = millis() + delay_ms;
+}
+
+void processScheduledReboot()
+{
+    if (!reboot_scheduled) {
+        return;
+    }
+
+    const long remaining = static_cast<long>(reboot_scheduled_at - millis());
+    if (remaining <= 0) {
+        ESP.restart();
+    }
+}
+
 lv_obj_t *createSwitchButton(lv_obj_t *parent, uint8_t id, lv_coord_t x, lv_coord_t y, lv_coord_t size)
 {
     lv_obj_t *btn = lv_btn_create(parent);
@@ -2565,24 +4001,18 @@ void setupUI()
     tileSecond = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_RIGHT | LV_DIR_LEFT);
     tileMaster = lv_tileview_add_tile(tileview, 0, 1, LV_DIR_TOP | LV_DIR_BOTTOM);
     tileMasterClock = lv_tileview_add_tile(tileview, 0, 2, LV_DIR_TOP | LV_DIR_BOTTOM);
-    tileSett = lv_tileview_add_tile(tileview, 0, 3, LV_DIR_TOP | LV_DIR_BOTTOM | LV_DIR_RIGHT);
-    tileDisplayCare = lv_tileview_add_tile(tileview, 1, 3, LV_DIR_LEFT);
-    tileCode = lv_tileview_add_tile(tileview, 0, 4, LV_DIR_TOP);
+    tileSett = lv_tileview_add_tile(tileview, 0, 3, LV_DIR_TOP);
     lv_obj_set_style_anim_time(tileMain, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileSecond, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileMaster, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileMasterClock, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileSett, 0, LV_PART_SCROLLBAR);
-    lv_obj_set_style_anim_time(tileDisplayCare, 0, LV_PART_SCROLLBAR);
-    lv_obj_set_style_anim_time(tileCode, 0, LV_PART_SCROLLBAR);
     hideScrollbarVisuals(tileview);
     hideScrollbarVisuals(tileMain);
     hideScrollbarVisuals(tileSecond);
     hideScrollbarVisuals(tileMaster);
     hideScrollbarVisuals(tileMasterClock);
     hideScrollbarVisuals(tileSett);
-    hideScrollbarVisuals(tileDisplayCare);
-    hideScrollbarVisuals(tileCode);
     lv_obj_set_tile(tileview, tileMain, LV_ANIM_OFF);
 
     const float angles[] = {270.0f, 0.0f, 90.0f, 180.0f};
@@ -2789,8 +4219,8 @@ void setupUI()
     ui_master_clock_info = lv_label_create(tileMasterClock);
     lv_label_set_text(
         ui_master_clock_info,
-        "Enable Clock Saver on the\n"
-        "Display page to use the\n"
+        "Enable Clock Button on the\n"
+        "Web UI to use the\n"
         "B1 clock screen.");
     lv_obj_set_width(ui_master_clock_info, full_size - scaleUi(60));
     lv_obj_align(ui_master_clock_info, LV_ALIGN_CENTER, 0, 0);
@@ -2801,49 +4231,45 @@ void setupUI()
 
     lv_obj_t *lbl_set = lv_label_create(tileSett);
     lv_label_set_text(lbl_set, "Settings");
-    lv_obj_align(lbl_set, LV_ALIGN_TOP_MID, 0, scaleUi(20));
+    lv_obj_align(lbl_set, LV_ALIGN_TOP_MID, 0, scaleUi(14));
     lv_obj_set_style_text_font(lbl_set, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_set, lv_color_white(), 0);
 
-    lv_obj_t *lbl_color = lv_label_create(tileSett);
-    lv_label_set_text(lbl_color, "Switch ON Color");
-    lv_obj_set_style_text_color(lbl_color, lv_color_white(), 0);
-    lv_obj_align_to(lbl_color, lbl_set, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(15));
-
-    lv_obj_t *color_panel = lv_obj_create(tileSett);
-    lv_obj_set_size(color_panel, full_size - scaleUi(40), scaleUi(60));
-    lv_obj_align_to(color_panel, lbl_color, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(5));
-    lv_obj_set_style_bg_color(color_panel, lv_color_black(), 0);
-    lv_obj_set_style_border_width(color_panel, 0, 0);
-    lv_obj_set_style_pad_all(color_panel, 0, 0);
-    lv_obj_set_style_pad_gap(color_panel, scaleUi(10), 0);
-    hideScrollbarVisuals(color_panel);
-    lv_obj_set_flex_flow(color_panel, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(color_panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    for (int i = 0; i < kNumColors; ++i) {
-        lv_obj_t *color_btn = lv_btn_create(color_panel);
-        lv_obj_set_size(color_btn, scaleUi(40), scaleUi(40));
-        lv_obj_set_style_bg_color(color_btn, lv_color_hex(kColorHexOptions[i]), 0);
-        lv_obj_set_style_radius(color_btn, scaleUi(5), 0);
-        lv_obj_add_event_cb(color_btn, color_button_event_handler, LV_EVENT_CLICKED, &color_button_ids[i]);
-    }
+    ui_settings_web_links_label = lv_label_create(tileSett);
+    lv_obj_set_width(ui_settings_web_links_label, full_size - scaleUi(88));
+    lv_label_set_long_mode(ui_settings_web_links_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(ui_settings_web_links_label, LV_ALIGN_TOP_MID, 0, scaleUi(78));
+    lv_obj_set_style_text_align(ui_settings_web_links_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(ui_settings_web_links_label, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_line_space(ui_settings_web_links_label, scaleUi(4), 0);
+    lv_obj_set_style_text_color(ui_settings_web_links_label, lv_color_make(210, 210, 210), 0);
+    updateSettingsWebLinksLabel();
 
     lv_obj_t *lbl_bri_title = lv_label_create(tileSett);
     lv_label_set_text(lbl_bri_title, "Display Brightness");
     lv_obj_set_style_text_color(lbl_bri_title, lv_color_white(), 0);
-    lv_obj_align_to(lbl_bri_title, color_panel, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(30));
+    lv_obj_set_style_text_font(lbl_bri_title, &lv_font_montserrat_16, 0);
+    lv_obj_align(lbl_bri_title, LV_ALIGN_TOP_MID, 0, scaleUi(230));
 
     ui_brightness_slider = lv_slider_create(tileSett);
-    lv_obj_set_width(ui_brightness_slider, scaleUi(300));
-    lv_obj_align_to(ui_brightness_slider, lbl_bri_title, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(5));
+    lv_obj_set_width(ui_brightness_slider, full_size - scaleUi(88));
+    lv_obj_set_height(ui_brightness_slider, scaleUi(22));
+    lv_obj_align(ui_brightness_slider, LV_ALIGN_TOP_MID, 0, scaleUi(260));
+    lv_obj_set_style_radius(ui_brightness_slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_radius(ui_brightness_slider, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(ui_brightness_slider, lv_color_make(48, 48, 48), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(ui_brightness_slider, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ui_brightness_slider, active_switch_color, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(ui_brightness_slider, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(ui_brightness_slider, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(ui_brightness_slider, scaleUi(7), LV_PART_KNOB);
     lv_slider_set_range(ui_brightness_slider, 1, boardProfile().brightness_levels);
     lv_slider_set_value(ui_brightness_slider, global_brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(ui_brightness_slider, brightness_slider_event_cb, LV_EVENT_VALUE_CHANGED, nullptr);
 
     lv_obj_t *bl_cont = lv_obj_create(tileSett);
-    lv_obj_set_size(bl_cont, full_size - scaleUi(40), scaleUi(75));
-    lv_obj_align_to(bl_cont, ui_brightness_slider, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(20));
+    lv_obj_set_size(bl_cont, full_size - scaleUi(120), scaleUi(66));
+    lv_obj_align(bl_cont, LV_ALIGN_TOP_MID, 0, scaleUi(304));
     lv_obj_set_style_bg_color(bl_cont, lv_color_black(), 0);
     lv_obj_set_style_border_width(bl_cont, 0, 0);
     lv_obj_set_style_pad_all(bl_cont, 0, 0);
@@ -2855,14 +4281,14 @@ void setupUI()
     lv_obj_t *bl_lbl = lv_label_create(bl_cont);
     lv_label_set_text(
         bl_lbl,
-        "Keep Screen 2 backlight ON\n"
-        "(Disable if you want to use the display\n"
-        "as a switch without it lighting up)");
+        "Allow Screen 2 to turn off\n"
+        "after inactivity");
+    lv_obj_set_width(bl_lbl, full_size - scaleUi(210));
     lv_obj_set_style_text_color(bl_lbl, lv_color_white(), 0);
     lv_obj_set_style_text_font(bl_lbl, &lv_font_montserrat_16, 0);
 
     ui_bl_toggle = lv_switch_create(bl_cont);
-    if (screen2_bl_always_on) {
+    if (!screen2_bl_always_on) {
         lv_obj_add_state(ui_bl_toggle, LV_STATE_CHECKED);
     }
     lv_obj_add_event_cb(ui_bl_toggle, bl_toggle_event_handler, LV_EVENT_VALUE_CHANGED, nullptr);
@@ -2871,283 +4297,13 @@ void setupUI()
     lv_label_set_text(lbl_home_status, "HOMEsmthng");
     lv_obj_set_style_text_font(lbl_home_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(lbl_home_status, lv_color_white(), 0);
-    lv_obj_align_to(lbl_home_status, bl_cont, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(20));
+    lv_obj_align(lbl_home_status, LV_ALIGN_TOP_MID, 0, scaleUi(386));
 
-    lv_obj_t *lbl_subtitle = lv_label_create(tileSett);
-    lv_label_set_text(lbl_subtitle, "developed with HomeSpan");
-    lv_obj_set_style_text_font(lbl_subtitle, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(lbl_subtitle, lv_color_make(180, 180, 180), 0);
-    lv_obj_align_to(lbl_subtitle, lbl_home_status, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(5));
-
-    lv_obj_t *lbl_swipe_hint_sett = lv_label_create(tileSett);
-    lv_label_set_text(lbl_swipe_hint_sett, LV_SYMBOL_UP "   " LV_SYMBOL_DOWN "   " LV_SYMBOL_RIGHT);
-    lv_obj_align(lbl_swipe_hint_sett, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(12));
-    lv_obj_set_style_text_font(lbl_swipe_hint_sett, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(lbl_swipe_hint_sett, lv_color_make(180, 180, 180), 0);
-
-    lv_obj_t *lbl_care_title = lv_label_create(tileDisplayCare);
-    lv_label_set_text(lbl_care_title, "Display");
-    lv_obj_align(lbl_care_title, LV_ALIGN_TOP_MID, 0, scaleUi(20));
-    lv_obj_set_style_text_font(lbl_care_title, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(lbl_care_title, lv_color_white(), 0);
-
-    lv_obj_t *pixel_shift_row = lv_obj_create(tileDisplayCare);
-    lv_obj_remove_style_all(pixel_shift_row);
-    lv_obj_set_size(pixel_shift_row, compact_width, compact_row_height);
-    lv_obj_align_to(pixel_shift_row, lbl_care_title, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(42));
-    lv_obj_set_style_pad_gap(pixel_shift_row, scaleUi(10), 0);
-    hideScrollbarVisuals(pixel_shift_row);
-    lv_obj_clear_flag(pixel_shift_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_layout(pixel_shift_row, LV_LAYOUT_FLEX, 0);
-    lv_obj_set_flex_flow(pixel_shift_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(pixel_shift_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *pixel_shift_label = lv_label_create(pixel_shift_row);
-    lv_label_set_text(pixel_shift_label, "Pixel Shift");
-    lv_obj_set_width(pixel_shift_label, compact_width - scaleUi(96));
-    lv_label_set_long_mode(pixel_shift_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_font(pixel_shift_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(pixel_shift_label, lv_color_white(), 0);
-
-    ui_pixel_shift_toggle = lv_switch_create(pixel_shift_row);
-    if (oled_pixel_shift_enabled) {
-        lv_obj_add_state(ui_pixel_shift_toggle, LV_STATE_CHECKED);
-    }
-    lv_obj_add_event_cb(ui_pixel_shift_toggle, oled_pixel_shift_toggle_event_handler, LV_EVENT_VALUE_CHANGED, nullptr);
-
-    lv_obj_t *clock_saver_row = lv_obj_create(tileDisplayCare);
-    lv_obj_remove_style_all(clock_saver_row);
-    lv_obj_set_size(clock_saver_row, compact_width, compact_row_height);
-    lv_obj_align_to(clock_saver_row, pixel_shift_row, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(16));
-    lv_obj_set_style_pad_gap(clock_saver_row, scaleUi(10), 0);
-    hideScrollbarVisuals(clock_saver_row);
-    lv_obj_clear_flag(clock_saver_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_layout(clock_saver_row, LV_LAYOUT_FLEX, 0);
-    lv_obj_set_flex_flow(clock_saver_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(clock_saver_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *clock_saver_label = lv_label_create(clock_saver_row);
-    lv_label_set_text(clock_saver_label, "Clock Saver");
-    lv_obj_set_width(clock_saver_label, compact_width - scaleUi(96));
-    lv_label_set_long_mode(clock_saver_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_font(clock_saver_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(clock_saver_label, lv_color_white(), 0);
-
-    ui_clock_saver_toggle = lv_switch_create(clock_saver_row);
-    if (oled_clock_saver_enabled) {
-        lv_obj_add_state(ui_clock_saver_toggle, LV_STATE_CHECKED);
-    }
-    lv_obj_add_event_cb(ui_clock_saver_toggle, oled_clock_saver_toggle_event_handler, LV_EVENT_VALUE_CHANGED, nullptr);
-
-    ui_timezone_button = lv_obj_create(tileDisplayCare);
-    lv_obj_remove_style_all(ui_timezone_button);
-    lv_obj_set_size(ui_timezone_button, compact_width, compact_row_height);
-    lv_obj_align_to(ui_timezone_button, clock_saver_row, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(16));
-    lv_obj_set_style_pad_gap(ui_timezone_button, scaleUi(10), 0);
-    hideScrollbarVisuals(ui_timezone_button);
-    lv_obj_add_flag(ui_timezone_button, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(ui_timezone_button, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_layout(ui_timezone_button, LV_LAYOUT_FLEX, 0);
-    lv_obj_set_flex_flow(ui_timezone_button, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(ui_timezone_button, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_add_event_cb(ui_timezone_button, timezone_button_event_handler, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *timezone_label = lv_label_create(ui_timezone_button);
-    lv_label_set_text(timezone_label, "Timezone");
-    lv_obj_set_style_text_font(timezone_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(timezone_label, lv_color_white(), 0);
-
-    ui_timezone_value_label = lv_label_create(ui_timezone_button);
-    lv_obj_set_width(ui_timezone_value_label, compact_width - scaleUi(150));
-    lv_label_set_long_mode(ui_timezone_value_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(ui_timezone_value_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_font(ui_timezone_value_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(ui_timezone_value_label, active_switch_color, 0);
-
-    ui_timezone_status_label = lv_label_create(tileDisplayCare);
-    lv_obj_set_width(ui_timezone_status_label, compact_width);
-    lv_label_set_long_mode(ui_timezone_status_label, LV_LABEL_LONG_CLIP);
-    lv_obj_align_to(ui_timezone_status_label, ui_timezone_button, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(24));
-    lv_obj_set_style_text_align(ui_timezone_status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(ui_timezone_status_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(ui_timezone_status_label, lv_color_make(190, 190, 190), 0);
-
-    ui_weather_setup_button = lv_obj_create(tileDisplayCare);
-    lv_obj_remove_style_all(ui_weather_setup_button);
-    lv_obj_set_size(ui_weather_setup_button, compact_width, compact_row_height);
-    lv_obj_align_to(ui_weather_setup_button, ui_timezone_status_label, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(18));
-    lv_obj_set_style_pad_gap(ui_weather_setup_button, scaleUi(10), 0);
-    hideScrollbarVisuals(ui_weather_setup_button);
-    lv_obj_add_flag(ui_weather_setup_button, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(ui_weather_setup_button, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(ui_weather_setup_button, weather_setup_button_event_handler, LV_EVENT_CLICKED, nullptr);
-
-    ui_weather_setup_value_label = lv_label_create(ui_weather_setup_button);
-    lv_obj_set_width(ui_weather_setup_value_label, compact_width);
-    lv_obj_center(ui_weather_setup_value_label);
-    lv_obj_set_style_text_align(ui_weather_setup_value_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(ui_weather_setup_value_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(ui_weather_setup_value_label, active_switch_color, 0);
-
-    lv_obj_t *lbl_swipe_hint_left = lv_label_create(tileDisplayCare);
-    lv_label_set_text(lbl_swipe_hint_left, LV_SYMBOL_LEFT);
-    lv_obj_align(lbl_swipe_hint_left, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(12));
-    lv_obj_set_style_text_font(lbl_swipe_hint_left, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(lbl_swipe_hint_left, lv_color_make(180, 180, 180), 0);
-
-    const String formatted_code = HOMEKIT_PAIRING_CODE_STR.substring(0, 4) + "-" + HOMEKIT_PAIRING_CODE_STR.substring(4, 8);
-
-    lv_obj_t *lbl_pairing_title = lv_label_create(tileCode);
-    lv_label_set_text(lbl_pairing_title, "HomeKit Pairing Code");
-    lv_obj_set_width(lbl_pairing_title, full_size);
-    lv_obj_align(lbl_pairing_title, LV_ALIGN_TOP_MID, 0, scaleUi(80));
-    lv_obj_set_style_text_align(lbl_pairing_title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_pairing_title, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(lbl_pairing_title, lv_color_white(), 0);
-
-    lv_obj_t *lbl_pairing_code = lv_label_create(tileCode);
-    lv_label_set_text(lbl_pairing_code, formatted_code.c_str());
-    lv_obj_set_width(lbl_pairing_code, full_size);
-    lv_obj_align_to(lbl_pairing_code, lbl_pairing_title, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(20));
-    lv_obj_set_style_text_align(lbl_pairing_code, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_pairing_code, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(lbl_pairing_code, lv_color_white(), 0);
-
-    lv_obj_t *lbl_fallback = lv_label_create(tileCode);
-    lv_label_set_text(
-        lbl_fallback,
-        "If pairing code doesn't work,\n"
-        "please try: 2244-6688, 4663-7726 or 1234-5678\n"
-        "(Try to be as close to your router as possible,\n"
-        "as this speeds up the process considerably and\n"
-        "also prevents the pairing process from failing)");
-    lv_obj_set_width(lbl_fallback, full_size);
-    lv_obj_align_to(lbl_fallback, lbl_pairing_code, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(15));
-    lv_obj_set_style_text_align(lbl_fallback, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_fallback, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(lbl_fallback, lv_color_make(180, 180, 180), 0);
-
-    ui_wifi_label = lv_label_create(tileCode);
+    ui_wifi_label = lv_label_create(tileSett);
     lv_label_set_text(ui_wifi_label, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_font(ui_wifi_label, &lv_font_montserrat_48, 0);
-    lv_obj_align(ui_wifi_label, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(116));
+    lv_obj_set_style_text_font(ui_wifi_label, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(ui_wifi_label, lv_color_white(), 0);
-
-    lv_obj_t *lbl_back_to_settings = lv_label_create(tileCode);
-    lv_label_set_text(lbl_back_to_settings, "Back to Settings");
-    lv_obj_align_to(lbl_back_to_settings, ui_wifi_label, LV_ALIGN_OUT_BOTTOM_MID, 0, scaleUi(6));
-    lv_obj_set_style_text_font(lbl_back_to_settings, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(lbl_back_to_settings, lv_color_make(180, 180, 180), 0);
-
-    lv_obj_t *lbl_swipe_hint_up = lv_label_create(tileCode);
-    lv_label_set_text(lbl_swipe_hint_up, LV_SYMBOL_UP);
-    lv_obj_align(lbl_swipe_hint_up, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(12));
-    lv_obj_set_style_text_font(lbl_swipe_hint_up, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(lbl_swipe_hint_up, lv_color_make(180, 180, 180), 0);
-
-    ui_timezone_modal = lv_obj_create(scr);
-    lv_obj_remove_style_all(ui_timezone_modal);
-    lv_obj_set_size(ui_timezone_modal, metrics.display_width, metrics.display_height);
-    lv_obj_set_style_bg_color(ui_timezone_modal, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(ui_timezone_modal, LV_OPA_90, 0);
-    hideScrollbarVisuals(ui_timezone_modal);
-    lv_obj_add_flag(ui_timezone_modal, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ui_timezone_modal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(ui_timezone_modal, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *timezone_modal_panel = lv_obj_create(ui_timezone_modal);
-    lv_obj_remove_style_all(timezone_modal_panel);
-    lv_obj_set_size(timezone_modal_panel, compact_width, full_size - scaleUi(110));
-    lv_obj_center(timezone_modal_panel);
-    hideScrollbarVisuals(timezone_modal_panel);
-    lv_obj_clear_flag(timezone_modal_panel, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *timezone_modal_title = lv_label_create(timezone_modal_panel);
-    lv_label_set_text(timezone_modal_title, "Timezone");
-    lv_obj_align(timezone_modal_title, LV_ALIGN_TOP_MID, 0, scaleUi(6));
-    lv_obj_set_style_text_font(timezone_modal_title, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(timezone_modal_title, lv_color_white(), 0);
-
-    ui_timezone_roller = lv_roller_create(timezone_modal_panel);
-    lv_roller_set_options(ui_timezone_roller, kTimezoneDropdownOptions, LV_ROLLER_MODE_NORMAL);
-    lv_roller_set_visible_row_count(ui_timezone_roller, kTimezoneVisibleRows);
-    lv_roller_set_selected(ui_timezone_roller, static_cast<uint16_t>(timezone_index), LV_ANIM_OFF);
-    lv_obj_set_width(ui_timezone_roller, compact_width - scaleUi(24));
-    lv_obj_align(ui_timezone_roller, LV_ALIGN_CENTER, 0, -scaleUi(8));
-    lv_obj_set_style_bg_color(ui_timezone_roller, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(ui_timezone_roller, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(ui_timezone_roller, lv_color_white(), 0);
-    lv_obj_set_style_text_font(ui_timezone_roller, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_bg_color(ui_timezone_roller, active_switch_color, LV_PART_SELECTED);
-    lv_obj_set_style_bg_opa(ui_timezone_roller, LV_OPA_COVER, LV_PART_SELECTED);
-    lv_obj_set_style_text_color(ui_timezone_roller, lv_color_white(), LV_PART_SELECTED);
-    lv_obj_set_style_border_width(ui_timezone_roller, 0, 0);
-    lv_obj_set_style_border_width(ui_timezone_roller, 0, LV_PART_SELECTED);
-    hideScrollbarVisuals(ui_timezone_roller);
-    lv_obj_add_event_cb(ui_timezone_roller, timezone_roller_event_handler, LV_EVENT_VALUE_CHANGED, nullptr);
-
-    ui_timezone_done_button = lv_btn_create(timezone_modal_panel);
-    lv_obj_set_size(ui_timezone_done_button, scaleUi(150), scaleUi(46));
-    lv_obj_align(ui_timezone_done_button, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(12));
-    lv_obj_set_style_radius(ui_timezone_done_button, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(ui_timezone_done_button, 0, 0);
-    lv_obj_set_style_bg_color(ui_timezone_done_button, active_switch_color, 0);
-    lv_obj_add_event_cb(ui_timezone_done_button, timezone_done_event_handler, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *timezone_done_label = lv_label_create(ui_timezone_done_button);
-    lv_label_set_text(timezone_done_label, "Done");
-    lv_obj_center(timezone_done_label);
-    lv_obj_set_style_text_color(timezone_done_label, lv_color_white(), 0);
-
-    updateTimezoneButtonLabel();
-    updateTimezoneStatusLabel();
-    updateWeatherSetupButtonLabel();
-
-    ui_weather_setup_modal = lv_obj_create(scr);
-    lv_obj_remove_style_all(ui_weather_setup_modal);
-    lv_obj_set_size(ui_weather_setup_modal, metrics.display_width, metrics.display_height);
-    lv_obj_set_style_bg_color(ui_weather_setup_modal, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(ui_weather_setup_modal, LV_OPA_90, 0);
-    hideScrollbarVisuals(ui_weather_setup_modal);
-    lv_obj_add_flag(ui_weather_setup_modal, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ui_weather_setup_modal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(ui_weather_setup_modal, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *weather_setup_modal_panel = lv_obj_create(ui_weather_setup_modal);
-    lv_obj_remove_style_all(weather_setup_modal_panel);
-    lv_obj_set_size(weather_setup_modal_panel, compact_width, full_size - scaleUi(110));
-    lv_obj_center(weather_setup_modal_panel);
-    hideScrollbarVisuals(weather_setup_modal_panel);
-    lv_obj_clear_flag(weather_setup_modal_panel, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *weather_setup_modal_title = lv_label_create(weather_setup_modal_panel);
-    lv_label_set_text(weather_setup_modal_title, "Weather");
-    lv_obj_align(weather_setup_modal_title, LV_ALIGN_TOP_MID, 0, scaleUi(6));
-    lv_obj_set_style_text_font(weather_setup_modal_title, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(weather_setup_modal_title, lv_color_white(), 0);
-
-    ui_weather_setup_modal_text = lv_label_create(weather_setup_modal_panel);
-    lv_obj_set_width(ui_weather_setup_modal_text, compact_width - scaleUi(20));
-    lv_label_set_long_mode(ui_weather_setup_modal_text, LV_LABEL_LONG_WRAP);
-    lv_obj_align(ui_weather_setup_modal_text, LV_ALIGN_TOP_MID, 0, scaleUi(54));
-    lv_obj_set_style_text_align(ui_weather_setup_modal_text, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(ui_weather_setup_modal_text, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(ui_weather_setup_modal_text, lv_color_white(), 0);
-
-    ui_weather_setup_done_button = lv_btn_create(weather_setup_modal_panel);
-    lv_obj_set_size(ui_weather_setup_done_button, scaleUi(150), scaleUi(46));
-    lv_obj_align(ui_weather_setup_done_button, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(12));
-    lv_obj_set_style_radius(ui_weather_setup_done_button, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(ui_weather_setup_done_button, 0, 0);
-    lv_obj_set_style_bg_color(ui_weather_setup_done_button, active_switch_color, 0);
-    lv_obj_add_event_cb(ui_weather_setup_done_button, weather_setup_done_event_handler, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *weather_setup_done_label = lv_label_create(ui_weather_setup_done_button);
-    lv_label_set_text(weather_setup_done_label, "Done");
-    lv_obj_center(weather_setup_done_label);
-    lv_obj_set_style_text_color(weather_setup_done_label, lv_color_white(), 0);
-
-    updateWeatherSetupModalContent();
+    lv_obj_align(ui_wifi_label, LV_ALIGN_BOTTOM_MID, 0, -scaleUi(14));
 
     screensaver_overlay = lv_obj_create(scr);
     lv_obj_remove_style_all(screensaver_overlay);
@@ -3331,9 +4487,11 @@ void setup()
     loadSettingsFromNVS();
     loadOrCreatePairingCode();
     loadOrCreateBridgeSuffix();
+    loadOrCreateDeviceConfig();
 
     HOMEKIT_PAIRING_CODE = HOMEKIT_PAIRING_CODE_STR.c_str();
     homeSpan.setPairingCode(HOMEKIT_PAIRING_CODE);
+    homeSpan.setQRID(kHomeKitSetupId);
 
     if (!displayBackend().begin()) {
         Serial.println("Display initialization failed");
@@ -3345,32 +4503,36 @@ void setup()
     setupUI();
     applyTimezoneSetting(true);
 
-    const String final_bridge_name = String("HOMEsmthng ") + BRIDGE_SUFFIX_STR;
-    homeSpan.setStatusCallback(homeSpanStatusCallback);
-    homeSpan.begin(Category::Bridges, final_bridge_name.c_str());
-    homeSpan.setApSSID("HOMEsmthng");
-    homeSpan.setApPassword("");
-    homeSpan.enableAutoStartAP();
-    startWeatherConfigServer();
-    ensureWeatherConfigServer();
+    StoredWifiCredentials wifi_credentials = {};
+    if (readStoredWifiCredentials(wifi_credentials)) {
+        const String final_bridge_name = String("HOMEsmthng ") + BRIDGE_SUFFIX_STR;
+        homeSpan.setStatusCallback(homeSpanStatusCallback);
+        homeSpan.begin(Category::Bridges, final_bridge_name.c_str(), device_host_name.c_str());
+        homeSpan.setHostNameSuffix("");
+        homespan_started = true;
 
-    new SpanAccessory();
-    new Service::AccessoryInformation();
-    new Characteristic::Identify();
-    new Characteristic::Name(boardProfile().accessory_name);
+        startWeatherConfigServer();
 
-    for (int i = 0; i < kNumSwitches; ++i) {
         new SpanAccessory();
         new Service::AccessoryInformation();
         new Characteristic::Identify();
-        new Characteristic::Name(kSwitchNames[i]);
-        homekit_switches[i] = new MySwitch(static_cast<uint8_t>(i));
-    }
+        new Characteristic::Name(boardProfile().accessory_name);
 
-    for (int i = 0; i < kNumSwitches; ++i) {
-        if (homekit_switches[i]) {
-            updateLVGLState(static_cast<uint8_t>(i), homekit_switches[i]->on->getVal());
+        for (int i = 0; i < kNumSwitches; ++i) {
+            new SpanAccessory();
+            new Service::AccessoryInformation();
+            new Characteristic::Identify();
+            new Characteristic::Name(kSwitchNames[i]);
+            homekit_switches[i] = new MySwitch(static_cast<uint8_t>(i));
         }
+
+        for (int i = 0; i < kNumSwitches; ++i) {
+            if (homekit_switches[i]) {
+                updateLVGLState(static_cast<uint8_t>(i), homekit_switches[i]->on->getVal());
+            }
+        }
+    } else {
+        startProvisioningMode();
     }
     updateMasterClockMode();
 
@@ -3385,20 +4547,31 @@ void setup()
 void loop()
 {
     lv_timer_handler();
-    homeSpan.poll();
+    if (homespan_started) {
+        homeSpan.poll();
+    }
     ensureWeatherConfigServer();
     if (weather_config_server_running) {
         weather_config_server.handleClient();
+    }
+    if (provisioning_server_running) {
+        provisioning_dns_server.processNextRequest();
+        provisioning_server.handleClient();
     }
 
     static unsigned long lastUpdate = 0;
     if (millis() - lastUpdate > 1000) {
         lastUpdate = millis();
         updateWiFiSymbol();
-        ensureTimeIsConfigured();
-        updateWeatherIfNeeded();
-        if (isMasterClockTileActive()) {
-            updateMasterClock(false);
+        if (homespan_started) {
+            ensureTimeIsConfigured();
+            updateWeatherIfNeeded();
+            if (isMasterClockTileActive()) {
+                updateMasterClock(false);
+            }
+        } else {
+            updateWeatherSetupButtonLabel();
+            updateWeatherSetupModalContent();
         }
         logWeatherConfigUrls();
     }
@@ -3415,5 +4588,6 @@ void loop()
     }
 
     safeSetBrightness(target_brightness_level);
+    processScheduledReboot();
     delay(5);
 }
