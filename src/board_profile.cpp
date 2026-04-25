@@ -1,5 +1,10 @@
 #include "board_profile.h"
 
+// Compile-time board descriptions.
+//
+// Centralizing these values lets the UI scale and the backend choose pinouts
+// without scattering board-specific conditionals through the app.
+
 namespace {
 
 constexpr BoardProfile kTrgbFullCircle = {

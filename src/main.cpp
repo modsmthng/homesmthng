@@ -2,6 +2,10 @@
  * @file      main.cpp
  * @author    modsmthng
  * @date      2026-03-23
+ *
+ * High-level firmware orchestration. Feature-specific state, persistence and
+ * reusable helpers live in smaller modules; this file still owns the LVGL and
+ * HomeSpan callback graph while the remaining UI/web code is split safely.
  */
 
 #include <Arduino.h>
@@ -13,284 +17,20 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <lvgl.h>
-#include <nvs.h>
 #include <qrcodegen.h>
 
 #include <math.h>
-#include <memory>
 #include <time.h>
 
+#include "app_state.h"
+#include "app_utils.h"
 #include "display_backend.h"
+#include "settings_store.h"
 
 namespace {
 
-constexpr int kNumSwitches = 9;
-constexpr int kNumUiSwitches = 8;
-constexpr int kNumColors = 6;
-constexpr int kNumTimezones = 9;
-constexpr int kTimezoneVisibleRows = 5;
-constexpr int kWebBrightnessScaleMax = 10;
-constexpr int kDefaultBrightnessScale = 8;
-constexpr uint32_t kDefaultColorHex = 0xF5F1E8;
-constexpr uint32_t kClockSaverIdleMs = 60000;
-constexpr uint32_t kClockSaverMinIdleMs = 10000;
-constexpr uint32_t kClockSaverMaxIdleMs = 3600000;
-constexpr uint32_t kClockWakeDetectMs = 250;
-constexpr uint32_t kPixelShiftIntervalMs = 30000;
-constexpr uint32_t kWeatherRefreshMs = 15UL * 60UL * 1000UL;
-constexpr uint32_t kWeatherRetryMs = 60UL * 1000UL;
-constexpr uint32_t kDeferredRebootMs = 1500;
-constexpr int kPixelShiftAmplitude = 2;
-constexpr time_t kValidClockEpoch = 1704067200; // 2024-01-01 00:00:00 UTC
-constexpr int kDefaultTimezoneIndex = 1;
-constexpr int kWeatherSearchResultLimit = 5;
-constexpr uint16_t kAdminWebPort = 8080;
-constexpr uint16_t kProvisioningPort = 80;
-constexpr int kDefaultDisplayRotationDegrees = 0;
-constexpr char kHomeKitSetupId[] = "HSPN";
-constexpr char kHomeSpanWifiNamespace[] = "WIFI";
-constexpr char kHomeSpanWifiKey[] = "WIFIDATA";
-constexpr char kDefaultHostBase[] = "homesmthng";
-
-constexpr int8_t kPixelShiftSteps[][2] = {
-    {0, 0},
-    {1, 0},
-    {1, 1},
-    {0, 1},
-    {-1, 1},
-    {-1, 0},
-    {-1, -1},
-    {0, -1},
-    {1, -1},
-};
-
-const char *kSwitchNames[kNumSwitches] = {"S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "B1"};
-const uint32_t kColorHexOptions[kNumColors] = {0xFF0000, 0xFF9900, 0xF5F1E8, 0xA8C6FE, 0x68724D, 0xF99963};
-const char *kColorLabels[kNumColors] = {"Red", "Orange", "Warm White", "Blue", "Olive", "Peach"};
-const char *kTimezoneLabels[kNumTimezones] = {
-    "UTC",
-    "Berlin",
-    "London",
-    "New York",
-    "Chicago",
-    "Denver",
-    "Los Angeles",
-    "Tokyo",
-    "Sydney",
-};
-const char *kTimezoneRules[kNumTimezones] = {
-    "UTC0",
-    "CET-1CEST,M3.5.0/2,M10.5.0/3",
-    "GMT0BST,M3.5.0/1,M10.5.0/2",
-    "EST5EDT,M3.2.0/2,M11.1.0/2",
-    "CST6CDT,M3.2.0/2,M11.1.0/2",
-    "MST7MDT,M3.2.0/2,M11.1.0/2",
-    "PST8PDT,M3.2.0/2,M11.1.0/2",
-    "JST-9",
-    "AEST-10AEDT,M10.1.0/2,M4.1.0/3",
-};
-constexpr char kTimezoneDropdownOptions[] =
-    "UTC\n"
-    "Berlin\n"
-    "London\n"
-    "New York\n"
-    "Chicago\n"
-    "Denver\n"
-    "Los Angeles\n"
-    "Tokyo\n"
-    "Sydney";
-
-struct WeatherLocation {
-    float latitude;
-    float longitude;
-};
-
-struct WeatherSearchResult {
-    String name;
-    String admin1;
-    String country;
-    float latitude = 0.0f;
-    float longitude = 0.0f;
-    bool valid = false;
-};
-
-struct StoredWifiCredentials {
-    char ssid[MAX_SSID + 1] = "";
-    char pwd[MAX_PWD + 1] = "";
-};
-
-enum class WeatherGlyph {
-    Sun,
-    Cloud,
-    Rain,
-};
-
-const WeatherLocation kWeatherLocations[kNumTimezones] = {
-    {51.4779f, 0.0015f},
-    {52.5200f, 13.4050f},
-    {51.5072f, -0.1276f},
-    {40.7128f, -74.0060f},
-    {41.8781f, -87.6298f},
-    {39.7392f, -104.9903f},
-    {34.0522f, -118.2437f},
-    {35.6762f, 139.6503f},
-    {-33.8688f, 151.2093f},
-};
-
-DisplayBackend &displayBackend()
-{
-    static std::unique_ptr<DisplayBackend> backend = createDisplayBackend();
-    return *backend;
-}
-
-const BoardProfile &boardProfile()
-{
-    return displayBackend().profile();
-}
-
-const UiMetrics &uiMetrics()
-{
-    return boardProfile().ui;
-}
-
-lv_coord_t scaleUi(int base_px)
-{
-    return static_cast<lv_coord_t>(uiMetrics().scale(base_px));
-}
-
-class MySwitch;
-
-Preferences preferences;
-MySwitch *homekit_switches[kNumSwitches] = {};
-
-String HOMEKIT_PAIRING_CODE_STR = "22446688";
-const char *HOMEKIT_PAIRING_CODE = nullptr;
-String BRIDGE_SUFFIX_STR;
-String weather_location_name;
-String device_host_name;
-String device_label;
-
-lv_obj_t *ui_root = nullptr;
-lv_obj_t *ui_viewport = nullptr;
-lv_obj_t *ui_shift_layer = nullptr;
-lv_obj_t *tileview = nullptr;
-lv_obj_t *tileMain = nullptr;
-lv_obj_t *tileSecond = nullptr;
-lv_obj_t *tileMaster = nullptr;
-lv_obj_t *tileMasterClock = nullptr;
-lv_obj_t *tileSett = nullptr;
-lv_obj_t *tileDisplayCare = nullptr;
-lv_obj_t *tileCode = nullptr;
-lv_obj_t *ui_switch_buttons[kNumUiSwitches] = {};
-lv_obj_t *ui_big_button = nullptr;
-lv_obj_t *ui_master_clock_button = nullptr;
-lv_obj_t *ui_master_clock_info = nullptr;
-lv_obj_t *ui_wifi_label = nullptr;
-lv_obj_t *ui_settings_web_links_label = nullptr;
-lv_obj_t *ui_brightness_slider = nullptr;
-lv_obj_t *ui_bl_toggle = nullptr;
-lv_obj_t *ui_wifi_setup_msg = nullptr;
-lv_obj_t *ui_pixel_shift_toggle = nullptr;
-lv_obj_t *ui_clock_button_toggle = nullptr;
-lv_obj_t *ui_clock_saver_toggle = nullptr;
-lv_obj_t *ui_timezone_button = nullptr;
-lv_obj_t *ui_timezone_value_label = nullptr;
-lv_obj_t *ui_timezone_status_label = nullptr;
-lv_obj_t *ui_timezone_modal = nullptr;
-lv_obj_t *ui_timezone_roller = nullptr;
-lv_obj_t *ui_timezone_done_button = nullptr;
-lv_obj_t *ui_weather_setup_button = nullptr;
-lv_obj_t *ui_weather_setup_value_label = nullptr;
-lv_obj_t *ui_weather_setup_modal = nullptr;
-lv_obj_t *ui_weather_setup_modal_text = nullptr;
-lv_obj_t *ui_weather_setup_done_button = nullptr;
-lv_obj_t *screensaver_overlay = nullptr;
-lv_obj_t *screensaver_clock_layer = nullptr;
-lv_obj_t *screensaver_clock_face = nullptr;
-lv_obj_t *screensaver_hour_hand = nullptr;
-lv_obj_t *screensaver_minute_hand = nullptr;
-lv_obj_t *screensaver_second_hand = nullptr;
-lv_obj_t *screensaver_center_dot = nullptr;
-lv_obj_t *screensaver_weather_group = nullptr;
-lv_obj_t *screensaver_weather_icon = nullptr;
-lv_obj_t *screensaver_weather_temp_label = nullptr;
-lv_obj_t *screensaver_weather_sun_core = nullptr;
-lv_obj_t *screensaver_weather_sun_rays[8] = {};
-lv_obj_t *screensaver_weather_cloud_parts[4] = {};
-lv_obj_t *screensaver_weather_rain_lines[3] = {};
-lv_obj_t *master_clock_face = nullptr;
-lv_obj_t *master_hour_hand = nullptr;
-lv_obj_t *master_minute_hand = nullptr;
-lv_obj_t *master_second_hand = nullptr;
-lv_obj_t *master_center_dot = nullptr;
-lv_obj_t *master_weather_group = nullptr;
-lv_obj_t *master_weather_icon = nullptr;
-lv_obj_t *master_weather_temp_label = nullptr;
-lv_obj_t *master_weather_sun_core = nullptr;
-lv_obj_t *master_weather_sun_rays[8] = {};
-lv_obj_t *master_weather_cloud_parts[4] = {};
-lv_obj_t *master_weather_rain_lines[3] = {};
-
-lv_point_t screensaver_hour_points[2] = {};
-lv_point_t screensaver_minute_points[2] = {};
-lv_point_t screensaver_second_points[2] = {};
-lv_point_t screensaver_weather_sun_ray_points[8][2] = {};
-lv_point_t master_hour_points[2] = {};
-lv_point_t master_minute_points[2] = {};
-lv_point_t master_second_points[2] = {};
-lv_point_t master_weather_sun_ray_points[8][2] = {};
-
-lv_timer_t *screen2_timer = nullptr;
-WebServer weather_config_server(kAdminWebPort);
-WebServer provisioning_server(kProvisioningPort);
-DNSServer provisioning_dns_server;
-
-int global_brightness = 13;
-int current_display_brightness = -1;
-int display_ui_rotation_degrees = kDefaultDisplayRotationDegrees;
-bool screen2_bl_always_on = true;
-bool oled_pixel_shift_enabled = false;
-bool oled_clock_saver_enabled = true;
-bool clock_button_screen_enabled = true;
-uint32_t clock_saver_idle_ms = kClockSaverIdleMs;
-bool screensaver_visible = false;
-int pixel_shift_x = 0;
-int pixel_shift_y = 0;
-int timezone_index = kDefaultTimezoneIndex;
-bool timezone_sync_pending = true;
-bool weather_use_custom_location = false;
-bool weather_enabled = true;
-bool weather_has_data = false;
-bool weather_refresh_pending = true;
-int weather_temperature_c = 0;
-int weather_code = 0;
-bool weather_is_day = true;
-float weather_custom_latitude = 0.0f;
-float weather_custom_longitude = 0.0f;
-unsigned long weather_last_request_ms = 0;
-unsigned long weather_last_success_ms = 0;
-WeatherGlyph weather_glyph = WeatherGlyph::Cloud;
-bool weather_config_server_routes_registered = false;
-bool weather_config_server_running = false;
-bool provisioning_server_routes_registered = false;
-bool provisioning_server_running = false;
-bool provisioning_mode_active = false;
-bool wifi_setup_info_visible = false;
-bool homespan_started = false;
-bool homekit_is_paired = false;
-bool reboot_scheduled = false;
-unsigned long reboot_scheduled_at = 0;
-
-uint32_t active_switch_color_hex = kDefaultColorHex;
-lv_color_t active_switch_color = lv_color_hex(active_switch_color_hex);
-
-uint8_t switch_button_ids[kNumUiSwitches] = {};
-uint8_t color_button_ids[kNumColors] = {};
-
-void saveSettingsToNVS();
 void updateLVGLState(uint8_t id, bool state);
 void updateWiFiSymbol();
-void safeSetBrightness(int target_brightness);
 void applyNewColor(lv_color_t new_color);
 void screen2_off_timer_cb(lv_timer_t *);
 void applyClockAccentColor(lv_color_t color);
@@ -298,17 +38,6 @@ void updateMasterClockAppearance();
 void hideScrollbarVisuals(lv_obj_t *obj);
 void disableDecorationInteraction(lv_obj_t *obj);
 void updateScrollbarModes();
-bool supportsPixelShift();
-bool supportsClockSaver();
-bool isPixelShiftEnabled();
-bool isClockSaverEnabled();
-bool isClockButtonEnabled();
-bool isWeatherEnabled();
-bool shouldShowClockWeather();
-int screensaverBrightness();
-int pixelShiftSafeCropInset();
-bool hasCustomWeatherLocation();
-bool isValidWeatherCoordinates(float latitude, float longitude);
 WeatherLocation selectedWeatherLocation();
 String selectedWeatherLocationLabel();
 void syncScreen2IdleTimer();
@@ -318,10 +47,6 @@ void updateScreensaverClock(bool force);
 void updateMasterClock(bool force);
 void updateMasterClockMode();
 void updateWeatherMonogram();
-bool extractJsonNumberField(const String &json, const char *key, float &value);
-bool extractJsonStringField(const String &json, const char *key, String &value);
-bool parseFloatParameter(const String &text, float &value);
-String urlEncode(const String &text);
 WeatherGlyph glyphForWeatherCode(int code, bool is_day);
 const char *weatherGlyphLabel(WeatherGlyph glyph);
 void setScreensaverWeatherGlyph(WeatherGlyph glyph);
@@ -335,11 +60,7 @@ bool fetchWeatherSearchResults(
     int &result_count,
     String &error_message);
 void updateWeatherIfNeeded();
-String htmlEscape(const String &text);
 String weatherSearchDisplayName(const WeatherSearchResult &result);
-String defaultDeviceHostName();
-String defaultDeviceLabel();
-String sanitizeHostName(const String &text);
 String formattedPairingCode();
 String setupAccessPointSsid();
 String setupPortalUrl();
@@ -347,17 +68,7 @@ String adminMdnsUrl();
 String adminDirectUrl();
 bool isPairingOnboardingActive();
 String defaultAdminSection(const String &requested_section);
-bool readStoredWifiCredentials(StoredWifiCredentials &credentials);
-bool saveStoredWifiCredentials(const StoredWifiCredentials &credentials);
-void eraseStoredWifiCredentials();
-void loadOrCreateDeviceConfig();
-void saveDeviceConfigToNVS();
 void applyBrightnessSetting(int brightness, bool persist);
-int brightnessScaleForWeb(int brightness);
-int brightnessLevelFromWebScale(int scale_value);
-int normalizeDisplayRotationDegrees(int degrees);
-bool parseHexColor(const String &text, uint32_t &color_hex);
-String colorHexCss(uint32_t color_hex);
 void applyDisplayRotationSetting(int degrees, bool persist);
 void applyScreen2BacklightSetting(bool enabled, bool persist);
 void applyPixelShiftSetting(bool enabled, bool persist);
@@ -400,6 +111,7 @@ void handleTimezoneSave();
 void handleDeviceConfigSave();
 void handleWifiConfigSave();
 void handleWifiReset();
+void handleDeviceReboot();
 void handleHomeKitQrSvg();
 void startWeatherConfigServer();
 void ensureWeatherConfigServer();
@@ -453,82 +165,7 @@ class MySwitch : public Service::Switch {
     Characteristic::On *on = nullptr;
 };
 
-void safeSetBrightness(int target_brightness)
-{
-    if (target_brightness < 1) {
-        target_brightness = 0;
-    }
-    if (target_brightness > boardProfile().brightness_levels) {
-        target_brightness = boardProfile().brightness_levels;
-    }
-
-    if (target_brightness != current_display_brightness) {
-        displayBackend().setBrightness(static_cast<uint8_t>(target_brightness));
-        current_display_brightness = target_brightness;
-    }
-}
-
-bool supportsPixelShift()
-{
-    return true;
-}
-
-bool supportsClockSaver()
-{
-    return true;
-}
-
-bool isPixelShiftEnabled()
-{
-    return supportsPixelShift() && oled_pixel_shift_enabled;
-}
-
-bool isClockSaverEnabled()
-{
-    return supportsClockSaver() && oled_clock_saver_enabled;
-}
-
-bool isClockButtonEnabled()
-{
-    return supportsClockSaver() && clock_button_screen_enabled;
-}
-
-bool isWeatherEnabled()
-{
-    return weather_enabled && hasCustomWeatherLocation();
-}
-
-bool shouldShowClockWeather()
-{
-    return isWeatherEnabled() && weather_has_data;
-}
-
-int screensaverBrightness()
-{
-    int target = global_brightness;
-    if (target < 0) {
-        target = 0;
-    }
-    if (target > boardProfile().brightness_levels) {
-        target = boardProfile().brightness_levels;
-    }
-    return target;
-}
-
-int pixelShiftSafeCropInset()
-{
-    return kPixelShiftAmplitude;
-}
-
-bool isValidWeatherCoordinates(float latitude, float longitude)
-{
-    return latitude >= -90.0f && latitude <= 90.0f && longitude >= -180.0f && longitude <= 180.0f;
-}
-
-bool hasCustomWeatherLocation()
-{
-    return weather_use_custom_location && isValidWeatherCoordinates(weather_custom_latitude, weather_custom_longitude);
-}
+MySwitch *homekit_switches[kNumSwitches] = {};
 
 const char *selectedTimezoneLabel()
 {
@@ -845,146 +482,6 @@ void updateWeatherSetupButtonLabel()
     }
 
     lv_label_set_text(ui_weather_setup_value_label, "Web UI " LV_SYMBOL_RIGHT);
-}
-
-bool extractJsonNumberField(const String &json, const char *key, float &value)
-{
-    const String pattern = String("\"") + key + "\":";
-    int start = json.indexOf(pattern);
-    if (start < 0) {
-        return false;
-    }
-
-    start += pattern.length();
-    while (start < json.length() && (json[start] == ' ' || json[start] == '\t')) {
-        ++start;
-    }
-
-    int end = start;
-    while (end < json.length()) {
-        const char c = json[end];
-        if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.') {
-            ++end;
-            continue;
-        }
-        break;
-    }
-
-    if (end == start) {
-        return false;
-    }
-
-    value = json.substring(start, end).toFloat();
-    return true;
-}
-
-bool extractJsonStringField(const String &json, const char *key, String &value)
-{
-    const String pattern = String("\"") + key + "\":\"";
-    int start = json.indexOf(pattern);
-    if (start < 0) {
-        return false;
-    }
-
-    start += pattern.length();
-    String parsed;
-    parsed.reserve(32);
-    bool escape = false;
-
-    for (int i = start; i < json.length(); ++i) {
-        const char c = json[i];
-
-        if (escape) {
-            switch (c) {
-            case '"':
-            case '\\':
-            case '/':
-                parsed += c;
-                break;
-            case 'b':
-                parsed += '\b';
-                break;
-            case 'f':
-                parsed += '\f';
-                break;
-            case 'n':
-                parsed += '\n';
-                break;
-            case 'r':
-                parsed += '\r';
-                break;
-            case 't':
-                parsed += '\t';
-                break;
-            default:
-                parsed += c;
-                break;
-            }
-            escape = false;
-            continue;
-        }
-
-        if (c == '\\') {
-            escape = true;
-            continue;
-        }
-
-        if (c == '"') {
-            value = parsed;
-            return true;
-        }
-
-        parsed += c;
-    }
-
-    return false;
-}
-
-bool parseFloatParameter(const String &text, float &value)
-{
-    String trimmed = text;
-    trimmed.trim();
-    if (trimmed.isEmpty()) {
-        return false;
-    }
-
-    trimmed.replace(',', '.');
-
-    char *parse_end = nullptr;
-    value = strtof(trimmed.c_str(), &parse_end);
-    return parse_end != trimmed.c_str() && parse_end && *parse_end == '\0';
-}
-
-String urlEncode(const String &text)
-{
-    String encoded;
-    encoded.reserve(text.length() * 3);
-
-    for (size_t i = 0; i < text.length(); ++i) {
-        const uint8_t c = static_cast<uint8_t>(text[i]);
-        const bool is_unreserved =
-            (c >= 'A' && c <= 'Z') ||
-            (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') ||
-            c == '-' || c == '_' || c == '.' || c == '~';
-
-        if (is_unreserved) {
-            encoded += static_cast<char>(c);
-            continue;
-        }
-
-        if (c == ' ') {
-            encoded += "%20";
-            continue;
-        }
-
-        char buffer[4];
-        snprintf(buffer, sizeof(buffer), "%02X", c);
-        encoded += '%';
-        encoded += buffer;
-    }
-
-    return encoded;
 }
 
 void getScreensaverClockTime(int &hour, int &minute, int &second)
@@ -1660,69 +1157,6 @@ bool fetchWeatherSearchResults(
     return true;
 }
 
-String htmlEscape(const String &text)
-{
-    String escaped;
-    escaped.reserve(text.length() + 16);
-
-    for (size_t i = 0; i < text.length(); ++i) {
-        switch (text[i]) {
-        case '&':
-            escaped += F("&amp;");
-            break;
-        case '<':
-            escaped += F("&lt;");
-            break;
-        case '>':
-            escaped += F("&gt;");
-            break;
-        case '"':
-            escaped += F("&quot;");
-            break;
-        case '\'':
-            escaped += F("&#39;");
-            break;
-        default:
-            escaped += text[i];
-            break;
-        }
-    }
-
-    return escaped;
-}
-
-String jsonEscape(const String &text)
-{
-    String escaped;
-    escaped.reserve(text.length() + 8);
-
-    for (size_t i = 0; i < text.length(); ++i) {
-        const char c = text[i];
-        switch (c) {
-        case '\\':
-            escaped += F("\\\\");
-            break;
-        case '"':
-            escaped += F("\\\"");
-            break;
-        case '\n':
-            escaped += F("\\n");
-            break;
-        case '\r':
-            escaped += F("\\r");
-            break;
-        case '\t':
-            escaped += F("\\t");
-            break;
-        default:
-            escaped += c;
-            break;
-        }
-    }
-
-    return escaped;
-}
-
 String weatherSearchDisplayName(const WeatherSearchResult &result)
 {
     String label = result.name;
@@ -1738,66 +1172,6 @@ String weatherSearchDisplayName(const WeatherSearchResult &result)
     }
 
     return label;
-}
-
-String defaultDeviceHostName()
-{
-    String suffix = BRIDGE_SUFFIX_STR;
-    suffix.toLowerCase();
-    if (suffix.isEmpty()) {
-        suffix = "0000";
-    }
-    return String(kDefaultHostBase) + "-" + suffix;
-}
-
-String defaultDeviceLabel()
-{
-    if (BRIDGE_SUFFIX_STR.isEmpty()) {
-        return String("HOMEsmthng");
-    }
-    return String("HOMEsmthng ") + BRIDGE_SUFFIX_STR;
-}
-
-String sanitizeHostName(const String &text)
-{
-    String value = text;
-    value.trim();
-    value.toLowerCase();
-
-    String sanitized;
-    sanitized.reserve(value.length());
-    bool last_was_dash = false;
-
-    for (size_t i = 0; i < value.length(); ++i) {
-        const char c = value[i];
-        const bool is_alpha_numeric =
-            (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9');
-
-        if (is_alpha_numeric) {
-            sanitized += c;
-            last_was_dash = false;
-            continue;
-        }
-
-        if (!last_was_dash && sanitized.length() > 0) {
-            sanitized += '-';
-            last_was_dash = true;
-        }
-    }
-
-    while (sanitized.startsWith("-")) {
-        sanitized.remove(0, 1);
-    }
-    while (sanitized.endsWith("-")) {
-        sanitized.remove(sanitized.length() - 1);
-    }
-
-    if (sanitized.isEmpty()) {
-        return defaultDeviceHostName();
-    }
-
-    return sanitized;
 }
 
 String formattedPairingCode()
@@ -1861,87 +1235,6 @@ String defaultAdminSection(const String &requested_section)
     return String();
 }
 
-bool readStoredWifiCredentials(StoredWifiCredentials &credentials)
-{
-    memset(&credentials, 0, sizeof(credentials));
-
-    nvs_handle handle = 0;
-    if (nvs_open(kHomeSpanWifiNamespace, NVS_READONLY, &handle) != ESP_OK) {
-        return false;
-    }
-
-    size_t len = sizeof(credentials);
-    const esp_err_t err = nvs_get_blob(handle, kHomeSpanWifiKey, &credentials, &len);
-    nvs_close(handle);
-
-    if (err != ESP_OK || len < sizeof(credentials.ssid)) {
-        memset(&credentials, 0, sizeof(credentials));
-        return false;
-    }
-
-    credentials.ssid[MAX_SSID] = '\0';
-    credentials.pwd[MAX_PWD] = '\0';
-    return strlen(credentials.ssid) > 0;
-}
-
-bool saveStoredWifiCredentials(const StoredWifiCredentials &credentials)
-{
-    nvs_handle handle = 0;
-    if (nvs_open(kHomeSpanWifiNamespace, NVS_READWRITE, &handle) != ESP_OK) {
-        return false;
-    }
-
-    const esp_err_t set_err = nvs_set_blob(handle, kHomeSpanWifiKey, &credentials, sizeof(credentials));
-    const esp_err_t commit_err = (set_err == ESP_OK) ? nvs_commit(handle) : set_err;
-    nvs_close(handle);
-    return commit_err == ESP_OK;
-}
-
-void eraseStoredWifiCredentials()
-{
-    nvs_handle handle = 0;
-    if (nvs_open(kHomeSpanWifiNamespace, NVS_READWRITE, &handle) != ESP_OK) {
-        return;
-    }
-
-    nvs_erase_key(handle, kHomeSpanWifiKey);
-    nvs_commit(handle);
-    nvs_close(handle);
-}
-
-void loadOrCreateDeviceConfig()
-{
-    preferences.begin("homespan", false);
-
-    String stored_host = preferences.getString("device_host", "");
-    String stored_label = preferences.getString("device_label", "");
-
-    stored_host = sanitizeHostName(stored_host);
-    if (stored_host.isEmpty()) {
-        stored_host = defaultDeviceHostName();
-    }
-
-    stored_label.trim();
-    if (stored_label.isEmpty()) {
-        stored_label = defaultDeviceLabel();
-    }
-
-    device_host_name = stored_host;
-    device_label = stored_label;
-
-    preferences.putString("device_host", device_host_name);
-    preferences.putString("device_label", device_label);
-    preferences.end();
-}
-
-void saveDeviceConfigToNVS()
-{
-    preferences.begin("homespan", false);
-    preferences.putString("device_host", device_host_name);
-    preferences.putString("device_label", device_label);
-    preferences.end();
-}
-
 void applyBrightnessSetting(int brightness, bool persist)
 {
     global_brightness = constrain(brightness, 1, boardProfile().brightness_levels);
@@ -1955,44 +1248,6 @@ void applyBrightnessSetting(int brightness, bool persist)
     }
 }
 
-int brightnessScaleForWeb(int brightness)
-{
-    const int max_level = max(1, boardProfile().brightness_levels);
-    const int clamped_brightness = constrain(brightness, 1, max_level);
-    if (max_level <= 1) {
-        return kWebBrightnessScaleMax;
-    }
-
-    return static_cast<int>(lroundf(
-        (static_cast<float>(clamped_brightness - 1) * static_cast<float>(kWebBrightnessScaleMax)) /
-        static_cast<float>(max_level - 1)));
-}
-
-int brightnessLevelFromWebScale(int scale_value)
-{
-    const int max_level = max(1, boardProfile().brightness_levels);
-    const int clamped_scale = constrain(scale_value, 0, kWebBrightnessScaleMax);
-    if (max_level <= 1) {
-        return 1;
-    }
-
-    return 1 + static_cast<int>(lroundf(
-                   (static_cast<float>(clamped_scale) * static_cast<float>(max_level - 1)) /
-                   static_cast<float>(kWebBrightnessScaleMax)));
-}
-
-int normalizeDisplayRotationDegrees(int degrees)
-{
-    switch (degrees) {
-    case 90:
-    case 180:
-    case 270:
-        return degrees;
-    default:
-        return 0;
-    }
-}
-
 void applyDisplayRotationSetting(int degrees, bool persist)
 {
     display_ui_rotation_degrees = normalizeDisplayRotationDegrees(degrees);
@@ -2001,40 +1256,6 @@ void applyDisplayRotationSetting(int degrees, bool persist)
     if (persist) {
         saveSettingsToNVS();
     }
-}
-
-bool parseHexColor(const String &text, uint32_t &color_hex)
-{
-    String value = text;
-    value.trim();
-    if (value.startsWith("#")) {
-        value.remove(0, 1);
-    }
-
-    if (value.length() != 6) {
-        return false;
-    }
-
-    for (size_t i = 0; i < value.length(); ++i) {
-        const char c = value[i];
-        const bool is_hex =
-            (c >= '0' && c <= '9') ||
-            (c >= 'a' && c <= 'f') ||
-            (c >= 'A' && c <= 'F');
-        if (!is_hex) {
-            return false;
-        }
-    }
-
-    color_hex = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 16)) & 0xFFFFFF;
-    return true;
-}
-
-String colorHexCss(uint32_t color_hex)
-{
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "#%06lX", static_cast<unsigned long>(color_hex & 0xFFFFFF));
-    return String(buffer);
 }
 
 void applyScreen2BacklightSetting(bool enabled, bool persist)
@@ -2603,6 +1824,19 @@ String renderAdminPage(
     }
     page += ">Clock Button Screen</label>";
     page += F("<p class=\"subtle\">Shows the separate full-screen clock button page below the large single-button screen.</p></div>");
+    page += F("<div class=\"toggle-item\"><label for=\"screen_order\">Screen order</label>"
+              "<select id=\"screen_order\" name=\"screen_order\">");
+    page += "<option value=\"big_first\"";
+    if (!clock_button_screen_first) {
+        page += " selected";
+    }
+    page += ">Large B1 button first</option>";
+    page += "<option value=\"clock_first\"";
+    if (clock_button_screen_first) {
+        page += " selected";
+    }
+    page += ">Clock button first</option>";
+    page += F("</select><p class=\"subtle\">Choose which B1 page appears first below Screen 1. Restart to apply the new order.</p></div>");
     page += "<div class=\"toggle-item\"><label class=\"checkbox-label\"><input type=\"checkbox\" name=\"clock_sv\"";
     if (oled_clock_saver_enabled) {
         page += " checked";
@@ -2626,7 +1860,10 @@ String renderAdminPage(
     }
     page += F("</select>"
               "<p class=\"subtle\">Rotates the on-device display UI and touch input in 90 degree steps. Non-zero rotations can show panel artifacts on some devices.</p>"
-              "</div></details><div class=\"actions\"><button class=\"primary\" type=\"submit\">Save display settings</button></div></form></div></details>");
+              "</div></details><div class=\"actions\">"
+              "<button class=\"primary\" type=\"submit\">Save display settings</button>"
+              "<button class=\"secondary\" type=\"submit\" name=\"restart_after_save\" value=\"1\">Save &amp; restart</button>"
+              "</div></form></div></details>");
 
     page += "<details class=\"card section-card\"";
     if (open_time) {
@@ -2882,6 +2119,18 @@ void handleWeatherConfigSave()
 {
     const bool visibility_only = weather_config_server.hasArg("weather_visibility");
     const bool next_weather_enabled = visibility_only ? weather_config_server.hasArg("weather_enabled") : true;
+
+    if (visibility_only) {
+        if (!hasCustomWeatherLocation()) {
+            weather_config_server.send(400, "text/html; charset=utf-8", renderAdminPage("Set a weather location before enabling weather.", true, "", nullptr, 0, "", false, "weather"));
+            return;
+        }
+
+        applyWeatherEnabledSetting(next_weather_enabled, true);
+        redirectToWeatherSection();
+        return;
+    }
+
     float latitude = 0.0f;
     float longitude = 0.0f;
     const String latitude_arg = weather_config_server.arg("latitude");
@@ -2889,15 +2138,6 @@ void handleWeatherConfigSave()
 
     if (!parseFloatParameter(latitude_arg, latitude) || !parseFloatParameter(longitude_arg, longitude) ||
         !isValidWeatherCoordinates(latitude, longitude)) {
-        if (visibility_only && !next_weather_enabled) {
-            applyWeatherEnabledSetting(false, true);
-            weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Weather disabled.", false, "", nullptr, 0, "", false, "weather"));
-            return;
-        }
-        if (visibility_only) {
-            weather_config_server.send(400, "text/html; charset=utf-8", renderAdminPage("Set a weather location before enabling weather.", true, "", nullptr, 0, "", false, "weather"));
-            return;
-        }
         weather_config_server.send(400, "text/html; charset=utf-8", renderAdminPage("Please enter valid latitude and longitude values.", true, "", nullptr, 0, "", false, "weather"));
         return;
     }
@@ -2963,6 +2203,7 @@ void handleDisplaySettingsSave()
     applyScreen2BacklightSetting(!weather_config_server.hasArg("screen2_auto_off"), false);
     applyPixelShiftSetting(weather_config_server.hasArg("px_shift"), false);
     applyClockButtonSetting(weather_config_server.hasArg("clock_btn"), false);
+    clock_button_screen_first = weather_config_server.arg("screen_order") == "clock_first";
     applyClockSaverSetting(weather_config_server.hasArg("clock_sv"), false);
     long clock_idle_seconds_arg = weather_config_server.hasArg("clock_idle_s")
                                       ? weather_config_server.arg("clock_idle_s").toInt()
@@ -2973,6 +2214,12 @@ void handleDisplaySettingsSave()
     const uint32_t clock_idle_seconds = static_cast<uint32_t>(clock_idle_seconds_arg);
     applyClockSaverIdleSetting(clock_idle_seconds * 1000UL, false);
     saveSettingsToNVS();
+
+    if (weather_config_server.hasArg("restart_after_save")) {
+        scheduleReboot();
+        weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Display settings saved. Restarting now.", false, "", nullptr, 0, "", false, "display"));
+        return;
+    }
 
     weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Display settings saved.", false, "", nullptr, 0, "", false, "display"));
 }
@@ -3041,6 +2288,16 @@ void handleWifiReset()
     weather_config_server.send(200, "text/html; charset=utf-8", renderAdminPage("Wi-Fi reset. Rebooting into setup mode.", false, "", nullptr, 0, "", false, "wifi"));
 }
 
+void handleDeviceReboot()
+{
+    const String section = weather_config_server.arg("section");
+    scheduleReboot();
+    weather_config_server.send(
+        200,
+        "text/html; charset=utf-8",
+        renderAdminPage("Reboot scheduled. The device will restart in a moment.", false, "", nullptr, 0, "", false, section));
+}
+
 void handleHomeKitQrSvg()
 {
     const String svg = renderQrSvg(homeKitSetupPayload());
@@ -3068,6 +2325,7 @@ void startWeatherConfigServer()
     weather_config_server.on("/device/save", HTTP_POST, handleDeviceConfigSave);
     weather_config_server.on("/wifi/save", HTTP_POST, handleWifiConfigSave);
     weather_config_server.on("/wifi/reset", HTTP_POST, handleWifiReset);
+    weather_config_server.on("/device/reboot", HTTP_POST, handleDeviceReboot);
     weather_config_server.on("/homekit/qr.svg", HTTP_GET, handleHomeKitQrSvg);
     weather_config_server_routes_registered = true;
 }
@@ -3561,7 +2819,7 @@ void updateOledProtection()
             applyPixelShiftOffset(0, 0);
             last_shift_update = now;
         } else if (now - last_shift_update >= kPixelShiftIntervalMs) {
-            shift_index = (shift_index + 1U) % (sizeof(kPixelShiftSteps) / sizeof(kPixelShiftSteps[0]));
+            shift_index = (shift_index + 1U) % kPixelShiftStepCount;
             applyPixelShiftOffset(
                 static_cast<int>(kPixelShiftSteps[shift_index][0]) * kPixelShiftAmplitude,
                 static_cast<int>(kPixelShiftSteps[shift_index][1]) * kPixelShiftAmplitude);
@@ -3694,68 +2952,6 @@ void applyNewColor(lv_color_t new_color)
 
     applyClockAccentColor(active_switch_color);
     updateMasterClockAppearance();
-}
-
-void saveSettingsToNVS()
-{
-    preferences.begin("homespan", false);
-    preferences.putInt("brightness", global_brightness);
-    preferences.putUInt("color_hex", active_switch_color_hex);
-    preferences.putInt("ui_rot", display_ui_rotation_degrees);
-    preferences.putBool("screen2_bl", screen2_bl_always_on);
-    preferences.putBool("px_shift", oled_pixel_shift_enabled);
-    preferences.putBool("clock_btn", clock_button_screen_enabled);
-    preferences.putBool("clock_sv", oled_clock_saver_enabled);
-    preferences.putUInt("clock_idle", clock_saver_idle_ms);
-    preferences.putInt("tz_idx", timezone_index);
-    preferences.putBool("wx_enabled", weather_enabled);
-    preferences.putBool("wx_custom", weather_use_custom_location);
-    preferences.putString("wx_name", weather_location_name);
-    preferences.putFloat("wx_lat", weather_custom_latitude);
-    preferences.putFloat("wx_lon", weather_custom_longitude);
-    preferences.end();
-}
-
-void loadSettingsFromNVS()
-{
-    preferences.begin("homespan", true);
-    const int default_brightness = brightnessLevelFromWebScale(kDefaultBrightnessScale);
-    global_brightness = preferences.getInt("brightness", default_brightness);
-    active_switch_color_hex = preferences.getUInt("color_hex", kDefaultColorHex);
-    display_ui_rotation_degrees = normalizeDisplayRotationDegrees(preferences.getInt("ui_rot", kDefaultDisplayRotationDegrees));
-    screen2_bl_always_on = preferences.getBool("screen2_bl", true);
-    oled_pixel_shift_enabled = preferences.getBool("px_shift", false);
-    oled_clock_saver_enabled = preferences.getBool("clock_sv", supportsClockSaver());
-    clock_button_screen_enabled = preferences.getBool("clock_btn", supportsClockSaver());
-    clock_saver_idle_ms = preferences.getUInt("clock_idle", kClockSaverIdleMs);
-    timezone_index = preferences.getInt("tz_idx", kDefaultTimezoneIndex);
-    weather_enabled = preferences.getBool("wx_enabled", true);
-    weather_use_custom_location = preferences.getBool("wx_custom", false);
-    weather_location_name = preferences.getString("wx_name", "");
-    weather_custom_latitude = preferences.getFloat("wx_lat", 0.0f);
-    weather_custom_longitude = preferences.getFloat("wx_lon", 0.0f);
-    preferences.end();
-
-    if (timezone_index < 0 || timezone_index >= kNumTimezones) {
-        timezone_index = kDefaultTimezoneIndex;
-    }
-    timezone_sync_pending = true;
-
-    if (!supportsPixelShift()) {
-        oled_pixel_shift_enabled = false;
-    }
-    if (!supportsClockSaver()) {
-        oled_clock_saver_enabled = false;
-        clock_button_screen_enabled = false;
-    }
-    clock_saver_idle_ms = constrain(clock_saver_idle_ms, kClockSaverMinIdleMs, kClockSaverMaxIdleMs);
-    if (!hasCustomWeatherLocation()) {
-        weather_use_custom_location = false;
-        weather_location_name = "";
-        weather_has_data = false;
-    }
-
-    active_switch_color = lv_color_hex(active_switch_color_hex);
 }
 
 void small_switch_event_handler(lv_event_t *e)
@@ -3931,55 +3127,6 @@ void tileview_event_handler(lv_event_t *e)
     }
 }
 
-String generateAndStoreBridgeSuffix()
-{
-    const long random_val = random(0, 65536);
-    char buffer[5];
-    snprintf(buffer, sizeof(buffer), "%04X", static_cast<unsigned int>(random_val));
-
-    preferences.begin("homespan", false);
-    preferences.putString("br_suffix", buffer);
-    preferences.end();
-    return String(buffer);
-}
-
-void loadOrCreateBridgeSuffix()
-{
-    preferences.begin("homespan", false);
-    const String suffix = preferences.getString("br_suffix", "");
-    if (suffix.length() == 4) {
-        BRIDGE_SUFFIX_STR = suffix;
-    } else {
-        BRIDGE_SUFFIX_STR = generateAndStoreBridgeSuffix();
-    }
-    preferences.end();
-}
-
-String generateAndStorePairingCode()
-{
-    String code;
-    for (int i = 0; i < 8; ++i) {
-        code += String(random(0, 10));
-    }
-
-    preferences.begin("homespan", false);
-    preferences.putString("hk_code", code);
-    preferences.end();
-    return code;
-}
-
-void loadOrCreatePairingCode()
-{
-    preferences.begin("homespan", false);
-    const String code = preferences.getString("hk_code", "");
-    if (code.length() == 8) {
-        HOMEKIT_PAIRING_CODE_STR = code;
-    } else {
-        HOMEKIT_PAIRING_CODE_STR = generateAndStorePairingCode();
-    }
-    preferences.end();
-}
-
 void scheduleReboot(uint32_t delay_ms)
 {
     reboot_scheduled = true;
@@ -4063,8 +3210,10 @@ void setupUI()
 
     tileMain = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_LEFT | LV_DIR_BOTTOM | LV_DIR_RIGHT);
     tileSecond = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_RIGHT | LV_DIR_LEFT);
-    tileMaster = lv_tileview_add_tile(tileview, 0, 1, LV_DIR_TOP | LV_DIR_BOTTOM);
-    tileMasterClock = lv_tileview_add_tile(tileview, 0, 2, LV_DIR_TOP | LV_DIR_BOTTOM);
+    const uint8_t master_button_row = clock_button_screen_first ? 2 : 1;
+    const uint8_t master_clock_row = clock_button_screen_first ? 1 : 2;
+    tileMaster = lv_tileview_add_tile(tileview, 0, master_button_row, LV_DIR_TOP | LV_DIR_BOTTOM);
+    tileMasterClock = lv_tileview_add_tile(tileview, 0, master_clock_row, LV_DIR_TOP | LV_DIR_BOTTOM);
     tileSett = lv_tileview_add_tile(tileview, 0, 3, LV_DIR_TOP);
     lv_obj_set_style_anim_time(tileMain, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_anim_time(tileSecond, 0, LV_PART_SCROLLBAR);
