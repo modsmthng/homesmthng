@@ -46,6 +46,7 @@ constexpr int kDefaultTimezoneIndex = 1;
 constexpr int kWeatherSearchResultLimit = 5;
 constexpr uint16_t kAdminWebPort = 8080;
 constexpr uint16_t kProvisioningPort = 80;
+constexpr int kDefaultDisplayRotationDegrees = 0;
 constexpr char kHomeKitSetupId[] = "HSPN";
 constexpr char kHomeSpanWifiNamespace[] = "WIFI";
 constexpr char kHomeSpanWifiKey[] = "WIFIDATA";
@@ -246,6 +247,7 @@ DNSServer provisioning_dns_server;
 
 int global_brightness = 13;
 int current_display_brightness = -1;
+int display_ui_rotation_degrees = kDefaultDisplayRotationDegrees;
 bool screen2_bl_always_on = true;
 bool oled_pixel_shift_enabled = false;
 bool oled_clock_saver_enabled = true;
@@ -353,8 +355,10 @@ void saveDeviceConfigToNVS();
 void applyBrightnessSetting(int brightness, bool persist);
 int brightnessScaleForWeb(int brightness);
 int brightnessLevelFromWebScale(int scale_value);
+int normalizeDisplayRotationDegrees(int degrees);
 bool parseHexColor(const String &text, uint32_t &color_hex);
 String colorHexCss(uint32_t color_hex);
+void applyDisplayRotationSetting(int degrees, bool persist);
 void applyScreen2BacklightSetting(bool enabled, bool persist);
 void applyPixelShiftSetting(bool enabled, bool persist);
 void applyClockButtonSetting(bool enabled, bool persist);
@@ -1977,6 +1981,28 @@ int brightnessLevelFromWebScale(int scale_value)
                    static_cast<float>(kWebBrightnessScaleMax)));
 }
 
+int normalizeDisplayRotationDegrees(int degrees)
+{
+    switch (degrees) {
+    case 90:
+    case 180:
+    case 270:
+        return degrees;
+    default:
+        return 0;
+    }
+}
+
+void applyDisplayRotationSetting(int degrees, bool persist)
+{
+    display_ui_rotation_degrees = normalizeDisplayRotationDegrees(degrees);
+    displayBackend().setUiRotation(static_cast<uint16_t>(display_ui_rotation_degrees));
+
+    if (persist) {
+        saveSettingsToNVS();
+    }
+}
+
 bool parseHexColor(const String &text, uint32_t &color_hex)
 {
     String value = text;
@@ -2358,7 +2384,7 @@ String renderAdminPage(
         ":root{color-scheme:dark;--bg:#0c0f10;--surface:#171b1d;--surface-2:#111517;--border:#2a2f33;--border-strong:#40484d;--text:#f4f4f4;--muted:#c7cccf;--subtle:#98a1a6;--input:#0f1315;--primary:#68724D;--secondary:#273038;--danger:#3a2020;--msg:#1f2d24;--msg-text:#d7f2df;--error:#3a2020;--error-text:#ffd6d6;--shadow:0 18px 50px rgba(0,0,0,.22);}"
         "@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f5f2eb;--surface:#fffdf8;--surface-2:#f4f0e7;--border:#ded8cc;--border-strong:#bdb5a6;--text:#171b1d;--muted:#4b5257;--subtle:#737b80;--input:#ffffff;--primary:#68724D;--secondary:#e8e1d3;--danger:#f2d7d4;--msg:#e4efdc;--msg-text:#28361f;--error:#f2d7d4;--error-text:#5b1e18;--shadow:0 18px 50px rgba(74,63,44,.14);}}"
         "*{transition:background-color .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;}"
-        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:radial-gradient(circle at top left,color-mix(in srgb,var(--primary) 18%,transparent),transparent 34rem),var(--bg);color:var(--text);margin:0;padding:24px;}"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);margin:0;padding:24px;}"
         ".wrap{max-width:720px;margin:0 auto;}"
         ".card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:18px;box-shadow:0 0 0 rgba(0,0,0,0);}"
         ".card:hover{border-color:var(--border-strong);box-shadow:var(--shadow);transform:translateY(-1px);}"
@@ -2383,9 +2409,12 @@ String renderAdminPage(
         ".location-search input{flex:1 1 auto;min-width:0;}"
         ".pin-btn{flex:0 0 54px;border-radius:12px;padding:0;background:var(--secondary);color:var(--text);display:flex;align-items:center;justify-content:center;}"
         ".pin-btn svg{width:20px;height:20px;display:block;}"
-        ".manual-location{margin-top:20px;border:1px solid var(--border);border-radius:14px;background:var(--surface-2);overflow:hidden;}"
-        ".manual-location summary{padding:14px 16px;font-size:16px;font-weight:700;}"
-        ".manual-location .manual-body{padding:0 16px 16px 16px;border-top:1px solid var(--border);}"
+        ".manual-location{margin-top:10px;border:1px solid color-mix(in srgb,var(--border) 58%,transparent);border-radius:10px;background:transparent;overflow:hidden;}"
+        ".manual-location summary{padding:5px 10px;font-size:12px;font-weight:400;color:var(--subtle);cursor:pointer;line-height:1.25;}"
+        ".manual-location summary:hover{color:var(--text);background:color-mix(in srgb,var(--secondary) 32%,transparent);}"
+        ".manual-location .manual-body{padding:0 10px 10px 10px;border-top:1px solid color-mix(in srgb,var(--border) 58%,transparent);}"
+        ".manual-location .manual-body label{font-size:13px;font-weight:500;}"
+        ".manual-location .manual-body input,.manual-location .manual-body select{padding:10px 11px;font-size:14px;}"
         ".hidden-form{display:none;}"
         ".weather-location-hint{display:none;margin-top:10px;padding:10px 12px;border-radius:12px;background:var(--error);color:var(--error-text);font-size:14px;line-height:1.4;}"
         ".weather-location-hint.show{display:block;}"
@@ -2404,6 +2433,8 @@ String renderAdminPage(
         ".toggle-item .checkbox-label + .subtle{margin-left:34px;}"
         ".qr{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;}"
         ".qr img{width:220px;height:220px;background:#fff;border-radius:18px;padding:10px;box-sizing:border-box;}"
+        ".setting-block{margin-bottom:20px;}"
+        ".setting-block:last-of-type{margin-bottom:10px;}"
         ".stepper{display:flex;gap:10px;align-items:center;}"
         ".stepper input{flex:1 1 auto;margin:0;}"
         ".step-btn{min-width:52px;padding:12px 0;line-height:1;font-size:22px;}"
@@ -2424,7 +2455,17 @@ String renderAdminPage(
         ".section-card summary::-webkit-details-marker{display:none;}"
         ".section-card summary::after{content:'›';float:right;color:var(--subtle);transition:transform .2s ease;}"
         ".section-card[open] summary::after{transform:rotate(90deg);}"
+        ".section-card .manual-location summary{padding:5px 10px;font-size:12px;font-weight:400;line-height:1.25;color:var(--subtle);}"
+        ".section-card .manual-location summary:hover{color:var(--text);background:color-mix(in srgb,var(--secondary) 32%,transparent);}"
+        ".section-card .manual-location summary::after{font-size:12px;color:var(--subtle);}"
+        ".section-card .manual-location[open] summary::after{transform:rotate(90deg);}"
         ".section-body{padding:0 20px 20px 20px;border-top:1px solid var(--border);}"
+        ".brand-footer{text-align:center;margin:34px 0 10px 0;color:var(--text);}"
+        ".brand-footer strong{display:block;font-size:34px;line-height:1;font-weight:800;letter-spacing:-.04em;}"
+        ".brand-footer span{display:block;margin-top:6px;font-size:13px;color:var(--subtle);letter-spacing:.02em;}"
+        ".brand-footer a{display:inline-flex;align-items:center;gap:7px;margin-top:14px;color:var(--subtle);text-decoration:none;font-size:13px;}"
+        ".brand-footer a:hover{color:var(--text);}"
+        ".brand-footer svg{width:17px;height:17px;display:block;}"
         "@media(max-width:520px){body{padding:14px;}.card{padding:16px;}.status{grid-template-columns:1fr;gap:4px;}.status strong{margin-top:8px;}}"
         "</style></head><body><div class=\"wrap\">");
 
@@ -2516,7 +2557,7 @@ String renderAdminPage(
               "<form method=\"POST\" action=\"/settings/display\">"
               "<input type=\"hidden\" name=\"section\" value=\"display\">"
               "<input type=\"hidden\" name=\"color_idx\" id=\"color_idx\" value=\"\">"
-              "<div class=\"row\"><div><label for=\"brightness_scale\">Display Brightness</label>"
+              "<div class=\"setting-block\"><label for=\"brightness_scale\">Display Brightness</label>"
               "<div class=\"stepper\">"
               "<button class=\"secondary step-btn\" type=\"button\" onclick=\"adjustBrightness(-1)\" aria-label=\"Dunkler\">&#8722;</button>");
     page += "<input id=\"brightness_scale\" name=\"brightness_scale\" type=\"number\" min=\"0\" max=\"" + String(kWebBrightnessScaleMax) +
@@ -2524,7 +2565,7 @@ String renderAdminPage(
     page += F("<button class=\"secondary step-btn\" type=\"button\" onclick=\"adjustBrightness(1)\" aria-label=\"Heller\">+</button>"
               "</div>");
     page += F("<p class=\"subtle\">Use a simple scale from 0 (darkest) to 10 (brightest).</p>"
-              "</div><div><label for=\"color_picker\">Switch ON Color</label>");
+              "</div><div class=\"setting-block\"><label for=\"color_picker\">Switch ON Color</label>");
     page += "<div class=\"color-picker-wrap\"><input class=\"color-input\" id=\"color_picker\" name=\"color_picker\" type=\"color\" value=\"" + active_color_css + "\">";
     page += F("<span class=\"color-picker-plus\" aria-hidden=\"true\">+</span></div>"
               "<p class=\"subtle\">Tap the color field or choose a quick preset.</p>"
@@ -2542,7 +2583,7 @@ String renderAdminPage(
     }
     page += F("</div><label for=\"color_hex\">Hex Color</label>");
     page += "<input id=\"color_hex\" name=\"color_hex\" value=\"" + active_color_css + "\" maxlength=\"7\" spellcheck=\"false\">";
-    page += F("<p class=\"subtle\">Enter a value like #68724D.</p></div></div>");
+    page += F("<p class=\"subtle\">Enter a value like #68724D.</p></div>");
     page += F("<div class=\"checkboxes\">");
     page += "<div class=\"toggle-item\"><label class=\"checkbox-label\"><input type=\"checkbox\" name=\"screen2_auto_off\"";
     if (!screen2_bl_always_on) {
@@ -2571,7 +2612,21 @@ String renderAdminPage(
     page += F("<div class=\"toggle-item\"><label for=\"clock_idle_s\">Standby time</label>");
     page += "<input id=\"clock_idle_s\" name=\"clock_idle_s\" type=\"number\" min=\"10\" max=\"3600\" step=\"5\" value=\"" + String(clock_saver_idle_ms / 1000UL) + "\">";
     page += F("<p class=\"subtle\">Seconds of inactivity before the idle clock saver appears.</p></div>");
-    page += F("</div><div class=\"actions\"><button class=\"primary\" type=\"submit\">Save display settings</button></div></form></div></details>");
+    page += F("</div><details class=\"manual-location\"><summary>Experimental</summary><div class=\"manual-body\">"
+              "<label for=\"display_rotation\">Display UI orientation</label>"
+              "<select id=\"display_rotation\" name=\"display_rotation\">");
+    const int rotation_options[] = {0, 90, 180, 270};
+    for (int i = 0; i < 4; ++i) {
+        const int rotation = rotation_options[i];
+        page += "<option value=\"" + String(rotation) + "\"";
+        if (display_ui_rotation_degrees == rotation) {
+            page += " selected";
+        }
+        page += ">" + String(rotation) + "&deg;</option>";
+    }
+    page += F("</select>"
+              "<p class=\"subtle\">Rotates the on-device display UI and touch input in 90 degree steps. Non-zero rotations can show panel artifacts on some devices.</p>"
+              "</div></details><div class=\"actions\"><button class=\"primary\" type=\"submit\">Save display settings</button></div></form></div></details>");
 
     page += "<details class=\"card section-card\"";
     if (open_time) {
@@ -2771,7 +2826,10 @@ String renderAdminPage(
               "setTimeout(function(){weather.scrollIntoView({block:'start'});},50);"
               "}"
               "});"
-              "</script></div></body></html>");
+              "</script><div class=\"brand-footer\"><strong>HOMEsmthng</strong><span>by modsmthng</span>"
+              "<a href=\"https://github.com/modsmthng/homesmthng\" target=\"_blank\" rel=\"noopener noreferrer\">"
+              "<svg viewBox=\"0 0 496 512\" aria-hidden=\"true\" focusable=\"false\"><path fill=\"currentColor\" d=\"M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.6 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.7 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8z\"/></svg>"
+              "GitHub</a></div></div></body></html>");
 
     return page;
 }
@@ -2898,6 +2956,10 @@ void handleDisplaySettingsSave()
                                      ? weather_config_server.arg("brightness_scale").toInt()
                                      : brightnessScaleForWeb(global_brightness);
     applyBrightnessSetting(brightnessLevelFromWebScale(brightness_scale), false);
+    const int display_rotation = weather_config_server.hasArg("display_rotation")
+                                     ? weather_config_server.arg("display_rotation").toInt()
+                                     : display_ui_rotation_degrees;
+    applyDisplayRotationSetting(display_rotation, false);
     applyScreen2BacklightSetting(!weather_config_server.hasArg("screen2_auto_off"), false);
     applyPixelShiftSetting(weather_config_server.hasArg("px_shift"), false);
     applyClockButtonSetting(weather_config_server.hasArg("clock_btn"), false);
@@ -3138,7 +3200,7 @@ String renderProvisioningPage(const String &message, bool is_error)
         ":root{color-scheme:dark;--bg:#0c0f10;--surface:#171b1d;--surface-2:#111517;--border:#2a2f33;--border-strong:#40484d;--text:#f4f4f4;--muted:#c7cccf;--subtle:#98a1a6;--input:#0f1315;--primary:#68724D;--secondary:#273038;--msg:#1f2d24;--msg-text:#d7f2df;--error:#3a2020;--error-text:#ffd6d6;--shadow:0 18px 50px rgba(0,0,0,.22);}"
         "@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f5f2eb;--surface:#fffdf8;--surface-2:#f4f0e7;--border:#ded8cc;--border-strong:#bdb5a6;--text:#171b1d;--muted:#4b5257;--subtle:#737b80;--input:#ffffff;--primary:#68724D;--secondary:#e8e1d3;--msg:#e4efdc;--msg-text:#28361f;--error:#f2d7d4;--error-text:#5b1e18;--shadow:0 18px 50px rgba(74,63,44,.14);}}"
         "*{transition:background-color .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;}"
-        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:radial-gradient(circle at top left,color-mix(in srgb,var(--primary) 18%,transparent),transparent 34rem),var(--bg);color:var(--text);margin:0;padding:24px;}"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);margin:0;padding:24px;}"
         ".wrap{max-width:720px;margin:0 auto;}"
         ".card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:18px;box-shadow:0 0 0 rgba(0,0,0,0);}"
         ".card:hover{border-color:var(--border-strong);box-shadow:var(--shadow);transform:translateY(-1px);}"
@@ -3639,6 +3701,7 @@ void saveSettingsToNVS()
     preferences.begin("homespan", false);
     preferences.putInt("brightness", global_brightness);
     preferences.putUInt("color_hex", active_switch_color_hex);
+    preferences.putInt("ui_rot", display_ui_rotation_degrees);
     preferences.putBool("screen2_bl", screen2_bl_always_on);
     preferences.putBool("px_shift", oled_pixel_shift_enabled);
     preferences.putBool("clock_btn", clock_button_screen_enabled);
@@ -3659,6 +3722,7 @@ void loadSettingsFromNVS()
     const int default_brightness = brightnessLevelFromWebScale(kDefaultBrightnessScale);
     global_brightness = preferences.getInt("brightness", default_brightness);
     active_switch_color_hex = preferences.getUInt("color_hex", kDefaultColorHex);
+    display_ui_rotation_degrees = normalizeDisplayRotationDegrees(preferences.getInt("ui_rot", kDefaultDisplayRotationDegrees));
     screen2_bl_always_on = preferences.getBool("screen2_bl", true);
     oled_pixel_shift_enabled = preferences.getBool("px_shift", false);
     oled_clock_saver_enabled = preferences.getBool("clock_sv", supportsClockSaver());
@@ -4493,6 +4557,7 @@ void setup()
     homeSpan.setPairingCode(HOMEKIT_PAIRING_CODE);
     homeSpan.setQRID(kHomeKitSetupId);
 
+    displayBackend().setUiRotation(static_cast<uint16_t>(display_ui_rotation_degrees));
     if (!displayBackend().begin()) {
         Serial.println("Display initialization failed");
         while (true) {
