@@ -1,5 +1,10 @@
 #include "display_backend.h"
 
+// Board-specific display and touch adapters.
+//
+// LVGL setup differs per hardware family, so pin mapping and panel-driver
+// quirks stay here instead of leaking into the application code.
+
 #include <Arduino.h>
 #include <lvgl.h>
 
@@ -46,6 +51,8 @@ static void applyLvglRotation(uint16_t degrees)
         return;
     }
 
+    // Software rotation is experimental on these round displays. It keeps the
+    // app API simple, but some panel/driver combinations can still show tearing.
     disp->driver->sw_rotate = 1;
     lv_disp_set_rotation(disp, rotationToLvgl(degrees));
     lv_obj_invalidate(lv_scr_act());
@@ -102,6 +109,8 @@ static lv_color_t *allocateDrawBuffer(size_t pixels)
 {
     const size_t bytes = pixels * sizeof(lv_color_t);
 
+    // Prefer internal RAM for responsiveness and fall back to PSRAM so the
+    // firmware can still boot on memory-constrained builds.
     lv_color_t *buffer = static_cast<lv_color_t *>(heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (!buffer) {
         buffer = static_cast<lv_color_t *>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -223,6 +232,8 @@ class AmoledDisplayBackend final : public DisplayBackend {
 
     static void rounderCallback(lv_disp_drv_t *disp_drv, lv_area_t *area)
     {
+        // The AMOLED controller is happier when partial redraws are expanded to
+        // even dimensions; shrinking dirty areas can leave stale pixels behind.
         const lv_coord_t max_x = disp_drv ? (disp_drv->hor_res - 1) : area->x2;
         const lv_coord_t max_y = disp_drv ? (disp_drv->ver_res - 1) : area->y2;
 
