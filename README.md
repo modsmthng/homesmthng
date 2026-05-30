@@ -21,7 +21,7 @@ Demo video: https://youtu.be/96I17sV4fLk?si=4SN58w6wTHuDt7Tn
 - `lilygo_amoled_175`: LilyGo T-Display-S3 AMOLED 1.75"
 - `waveshare_amoled_175`: Waveshare ESP32-S3 Touch AMOLED 1.75"
 
-- 3D-Prints: [https://www.printables.com/model/1492077-minimalist-housing-with-frame-for-the-lilygo-t-rgb](https://www.printables.com/@dubios42/collections/2861668)
+- 3D-Prints: [Housings](https://www.printables.com/@dubios42/collections/2861668)
 
 The UI is normalized to a shared `466x466` canvas. On the T-RGB this leaves a `7px` black border around the active UI area.
 
