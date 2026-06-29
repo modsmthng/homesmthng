@@ -13,6 +13,7 @@ constexpr BoardProfile kTrgbFullCircle = {
     "HOMEsmthng Bridge",
     DisplayBackendKind::TrgbPanel,
     TouchBackendKind::Integrated,
+    BatteryBackendKind::TrgbAdc,
     {480, 480, 466, 7, 7},
     16,
     -1, -1, -1, -1, -1, -1,
@@ -24,6 +25,7 @@ constexpr BoardProfile kTrgbFullCircle = {
     false,
     false,
     false,
+    4,
 };
 
 // LilyGo's official 1.75-inch H0175Y003AM reference uses a CO5300 panel and CST9217 touch.
@@ -33,6 +35,7 @@ constexpr BoardProfile kLilyGoAmoled175 = {
     "HOMEsmthng Bridge",
     DisplayBackendKind::AmoledCo5300,
     TouchBackendKind::Cst9217,
+    BatteryBackendKind::Sy6970,
     {473, 467, 466, 3, 0},
     16,
     10, 12, 11, 13, 14, 15,
@@ -44,6 +47,7 @@ constexpr BoardProfile kLilyGoAmoled175 = {
     false,
     true,
     true,
+    -1,
 };
 
 constexpr BoardProfile kWaveshareAmoled175 = {
@@ -52,6 +56,7 @@ constexpr BoardProfile kWaveshareAmoled175 = {
     "HOMEsmthng Bridge",
     DisplayBackendKind::AmoledCo5300,
     TouchBackendKind::Cst9217,
+    BatteryBackendKind::Axp2101,
     {466, 466, 466, 0, 0},
     16,
     12, 38, 4, 5, 6, 7,
@@ -63,6 +68,7 @@ constexpr BoardProfile kWaveshareAmoled175 = {
     false,
     true,
     true,
+    -1,
 };
 
 } // namespace

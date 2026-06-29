@@ -185,12 +185,15 @@ void saveSettingsToNVS()
     preferences.putInt("brightness", global_brightness);
     preferences.putUInt("color_hex", active_switch_color_hex);
     preferences.putInt("ui_rot", display_ui_rotation_degrees);
-    preferences.putBool("screen2_bl", screen2_bl_always_on);
     preferences.putBool("px_shift", oled_pixel_shift_enabled);
     preferences.putBool("clock_btn", clock_button_screen_enabled);
     preferences.putBool("clock_first", clock_button_screen_first);
-    preferences.putBool("clock_sv", oled_clock_saver_enabled);
-    preferences.putUInt("clock_idle", clock_saver_idle_ms);
+    preferences.putBool("screen2_bl", screen2_bl_always_on);
+    preferences.putUChar("stby_mode", static_cast<uint8_t>(standby_mode));
+    preferences.putUInt("stby_idle", standby_idle_ms);
+    preferences.putInt("stby_bri", standby_brightness);
+    preferences.putBool("clock_sv", standby_mode == StandbyMode::ClockSaver);
+    preferences.putUInt("clock_idle", standby_idle_ms);
     preferences.putInt("tz_idx", timezone_index);
     preferences.putBool("wx_enabled", weather_enabled);
     preferences.putBool("wx_custom", weather_use_custom_location);
@@ -207,12 +210,25 @@ void loadSettingsFromNVS()
     global_brightness = preferences.getInt("brightness", default_brightness);
     active_switch_color_hex = preferences.getUInt("color_hex", kDefaultColorHex);
     display_ui_rotation_degrees = normalizeDisplayRotationDegrees(preferences.getInt("ui_rot", kDefaultDisplayRotationDegrees));
-    screen2_bl_always_on = preferences.getBool("screen2_bl", true);
     oled_pixel_shift_enabled = preferences.getBool("px_shift", false);
-    oled_clock_saver_enabled = preferences.getBool("clock_sv", supportsClockSaver());
     clock_button_screen_enabled = preferences.getBool("clock_btn", supportsClockSaver());
     clock_button_screen_first = preferences.getBool("clock_first", false);
-    clock_saver_idle_ms = preferences.getUInt("clock_idle", kClockSaverIdleMs);
+    screen2_bl_always_on = preferences.getBool("screen2_bl", true);
+    screen2_backlight_timed_out = false;
+    if (preferences.isKey("stby_mode")) {
+        const uint8_t stored_mode = preferences.getUChar("stby_mode", static_cast<uint8_t>(StandbyMode::ClockSaver));
+        standby_mode = stored_mode <= static_cast<uint8_t>(StandbyMode::ClockSaver)
+                           ? static_cast<StandbyMode>(stored_mode)
+                           : StandbyMode::ClockSaver;
+    } else {
+        standby_mode = preferences.getBool("clock_sv", supportsClockSaver())
+                           ? StandbyMode::ClockSaver
+                           : StandbyMode::Disabled;
+    }
+    standby_idle_ms = preferences.getUInt(
+        "stby_idle",
+        preferences.getUInt("clock_idle", kStandbyIdleMs));
+    standby_brightness = preferences.getInt("stby_bri", global_brightness);
     timezone_index = preferences.getInt("tz_idx", kDefaultTimezoneIndex);
     weather_enabled = preferences.getBool("wx_enabled", true);
     weather_use_custom_location = preferences.getBool("wx_custom", false);
@@ -230,10 +246,13 @@ void loadSettingsFromNVS()
         oled_pixel_shift_enabled = false;
     }
     if (!supportsClockSaver()) {
-        oled_clock_saver_enabled = false;
         clock_button_screen_enabled = false;
+        if (standby_mode == StandbyMode::ClockSaver) {
+            standby_mode = StandbyMode::Dim;
+        }
     }
-    clock_saver_idle_ms = constrain(clock_saver_idle_ms, kClockSaverMinIdleMs, kClockSaverMaxIdleMs);
+    standby_idle_ms = constrain(standby_idle_ms, kStandbyMinIdleMs, kStandbyMaxIdleMs);
+    standby_brightness = constrain(standby_brightness, 1, boardProfile().brightness_levels);
     if (!hasCustomWeatherLocation()) {
         weather_use_custom_location = false;
         weather_location_name = "";

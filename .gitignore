@@ -2,3 +2,6 @@
 .pio/
 .vscode/
 compile_commands.json
+web-flasher/dist/
+web-flasher/node_modules/
+.flasher-release/

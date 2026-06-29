@@ -13,7 +13,7 @@ Demo video: https://youtu.be/96I17sV4fLk?si=4SN58w6wTHuDt7Tn
 - Support for 9 switch endpoints
 - Board-specific display and touch backends selected at build time
 - Shared `466x466` UI canvas across targets
-- Display care features such as pixel shift, analog clock saver, and timezone selection
+- Display care features such as pixel shift, configurable standby (off, dim, or clock), and timezone selection
 
 ## Supported Boards
 
@@ -63,6 +63,24 @@ Open the serial monitor:
 pio device monitor -b 115200
 ```
 
+## Browser Installer
+
+The latest published release can be installed from
+[modsmthng.github.io/homesmthng](https://modsmthng.github.io/homesmthng/) using
+desktop Chrome or Edge and a USB data cable.
+
+- **Update** keeps Wi-Fi credentials, HomeKit pairing, and display settings.
+- **Install / Reinstall** erases the complete flash before installing HOMEsmthng.
+
+The display model must be selected manually because all supported boards use an
+ESP32-S3 and cannot be distinguished reliably by the browser flasher.
+
+The browser installer is built and deployed automatically when a GitHub Release
+is published. Before publishing the first release, configure **Settings → Pages →
+Source** to use **GitHub Actions**. Pull requests and pushes to `main` validate
+all firmware targets, the installer build, its manifest, and firmware checksums
+without deploying the site.
+
 ## Project Layout
 
 - `src/main.cpp`: application logic, HomeSpan setup, and LVGL UI
@@ -91,7 +109,10 @@ pio device monitor -b 115200
 
 ## Dependencies
 
-Dependencies are resolved automatically by PlatformIO from `platformio.ini`.
+Firmware dependencies are resolved automatically by PlatformIO from `platformio.ini`.
+The pinned Python helper used by the build is listed in `requirements-build.txt`.
+If it is missing from PlatformIO's Python environment, the build prints the
+exact installation command for that environment.
 
 Main libraries:
 

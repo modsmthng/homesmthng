@@ -100,11 +100,11 @@ lv_obj_t *ui_master_clock_info = nullptr;
 lv_obj_t *ui_wifi_label = nullptr;
 lv_obj_t *ui_settings_web_links_label = nullptr;
 lv_obj_t *ui_brightness_slider = nullptr;
-lv_obj_t *ui_bl_toggle = nullptr;
+lv_obj_t *ui_battery_status_label = nullptr;
 lv_obj_t *ui_wifi_setup_msg = nullptr;
+lv_obj_t *ui_bl_toggle = nullptr;
 lv_obj_t *ui_pixel_shift_toggle = nullptr;
 lv_obj_t *ui_clock_button_toggle = nullptr;
-lv_obj_t *ui_clock_saver_toggle = nullptr;
 lv_obj_t *ui_timezone_button = nullptr;
 lv_obj_t *ui_timezone_value_label = nullptr;
 lv_obj_t *ui_timezone_status_label = nullptr;
@@ -152,7 +152,6 @@ lv_point_t master_minute_points[2] = {};
 lv_point_t master_second_points[2] = {};
 lv_point_t master_weather_sun_ray_points[8][2] = {};
 
-lv_timer_t *screen2_timer = nullptr;
 WebServer weather_config_server(kAdminWebPort);
 WebServer provisioning_server(kProvisioningPort);
 DNSServer provisioning_dns_server;
@@ -160,13 +159,16 @@ DNSServer provisioning_dns_server;
 int global_brightness = 13;
 int current_display_brightness = -1;
 int display_ui_rotation_degrees = kDefaultDisplayRotationDegrees;
-bool screen2_bl_always_on = true;
 bool oled_pixel_shift_enabled = false;
-bool oled_clock_saver_enabled = true;
 bool clock_button_screen_enabled = true;
 bool clock_button_screen_first = false;
-uint32_t clock_saver_idle_ms = kClockSaverIdleMs;
-bool screensaver_visible = false;
+bool screen2_bl_always_on = true;
+bool screen2_backlight_timed_out = false;
+lv_timer_t *screen2_timer = nullptr;
+StandbyMode standby_mode = StandbyMode::ClockSaver;
+uint32_t standby_idle_ms = kStandbyIdleMs;
+int standby_brightness = 13;
+bool standby_active = false;
 int pixel_shift_x = 0;
 int pixel_shift_y = 0;
 int timezone_index = kDefaultTimezoneIndex;
@@ -251,9 +253,14 @@ bool isPixelShiftEnabled()
     return supportsPixelShift() && oled_pixel_shift_enabled;
 }
 
-bool isClockSaverEnabled()
+bool isStandbyEnabled()
 {
-    return supportsClockSaver() && oled_clock_saver_enabled;
+    return standby_mode != StandbyMode::Disabled;
+}
+
+bool isStandbyClockMode()
+{
+    return supportsClockSaver() && standby_mode == StandbyMode::ClockSaver;
 }
 
 bool isClockButtonEnabled()
@@ -271,16 +278,31 @@ bool shouldShowClockWeather()
     return isWeatherEnabled() && weather_has_data;
 }
 
-int screensaverBrightness()
+int effectiveStandbyBrightness()
 {
-    int target = global_brightness;
-    if (target < 0) {
-        target = 0;
+    const int max_level = max(1, boardProfile().brightness_levels);
+    return min(
+        constrain(global_brightness, 1, max_level),
+        constrain(standby_brightness, 1, max_level));
+}
+
+int currentBrightnessTarget()
+{
+    const bool large_b1_active = tileview && tileMaster
+                                 && lv_tileview_get_tile_act(tileview) == tileMaster;
+    if (!screen2_bl_always_on && screen2_backlight_timed_out && large_b1_active) {
+        return 0;
     }
-    if (target > boardProfile().brightness_levels) {
-        target = boardProfile().brightness_levels;
+
+    if (!standby_active || standby_mode == StandbyMode::Disabled) {
+        return global_brightness;
     }
-    return target;
+
+    if (standby_mode == StandbyMode::DisplayOff) {
+        return 0;
+    }
+
+    return effectiveStandbyBrightness();
 }
 
 int pixelShiftSafeCropInset()

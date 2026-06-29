@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "version": "development",
+  "chipFamily": "ESP32-S3",
+  "partitionLayout": "default_16MB-v1",
+  "boards": [
+    {
+      "id": "trgb_full_circle",
+      "label": "LilyGo T-RGB 2.1\" Full Circle",
+      "description": "Round 2.1-inch LCD",
+      "parts": [
+        { "name": "bootloader", "path": "firmware/trgb_full_circle/bootloader.bin", "address": 0, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "partitions", "path": "firmware/trgb_full_circle/partitions.bin", "address": 32768, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "boot_app0", "path": "firmware/trgb_full_circle/boot_app0.bin", "address": 57344, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "firmware", "path": "firmware/trgb_full_circle/firmware.bin", "address": 65536, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }
+      ]
+    },
+    {
+      "id": "lilygo_amoled_175",
+      "label": "LilyGo T-Display-S3 AMOLED 1.75\"",
+      "description": "Round 1.75-inch AMOLED",
+      "parts": [
+        { "name": "bootloader", "path": "firmware/lilygo_amoled_175/bootloader.bin", "address": 0, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "partitions", "path": "firmware/lilygo_amoled_175/partitions.bin", "address": 32768, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "boot_app0", "path": "firmware/lilygo_amoled_175/boot_app0.bin", "address": 57344, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "firmware", "path": "firmware/lilygo_amoled_175/firmware.bin", "address": 65536, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }
+      ]
+    },
+    {
+      "id": "waveshare_amoled_175",
+      "label": "Waveshare ESP32-S3 Touch AMOLED 1.75\"",
+      "description": "Round 1.75-inch AMOLED",
+      "parts": [
+        { "name": "bootloader", "path": "firmware/waveshare_amoled_175/bootloader.bin", "address": 0, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "partitions", "path": "firmware/waveshare_amoled_175/partitions.bin", "address": 32768, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "boot_app0", "path": "firmware/waveshare_amoled_175/boot_app0.bin", "address": 57344, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+        { "name": "firmware", "path": "firmware/waveshare_amoled_175/firmware.bin", "address": 65536, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }
+      ]
+    }
+  ]
+}

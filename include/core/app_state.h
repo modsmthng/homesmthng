@@ -24,10 +24,10 @@ constexpr int kTimezoneVisibleRows = 5;
 constexpr int kWebBrightnessScaleMax = 10;
 constexpr int kDefaultBrightnessScale = 8;
 constexpr uint32_t kDefaultColorHex = 0xF5F1E8;
-constexpr uint32_t kClockSaverIdleMs = 60000;
-constexpr uint32_t kClockSaverMinIdleMs = 10000;
-constexpr uint32_t kClockSaverMaxIdleMs = 3600000;
-constexpr uint32_t kClockWakeDetectMs = 250;
+constexpr uint32_t kStandbyIdleMs = 60000;
+constexpr uint32_t kStandbyMinIdleMs = 10000;
+constexpr uint32_t kStandbyMaxIdleMs = 3600000;
+constexpr uint32_t kScreen2BacklightIdleMs = 5000;
 constexpr uint32_t kPixelShiftIntervalMs = 30000;
 constexpr uint32_t kWeatherRefreshMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kWeatherRetryMs = 60UL * 1000UL;
@@ -78,6 +78,13 @@ enum class WeatherGlyph {
     Rain,
 };
 
+enum class StandbyMode : uint8_t {
+    Disabled = 0,
+    DisplayOff = 1,
+    Dim = 2,
+    ClockSaver = 3,
+};
+
 extern const WeatherLocation kWeatherLocations[kNumTimezones];
 
 extern Preferences preferences;
@@ -107,11 +114,11 @@ extern lv_obj_t *ui_master_clock_info;
 extern lv_obj_t *ui_wifi_label;
 extern lv_obj_t *ui_settings_web_links_label;
 extern lv_obj_t *ui_brightness_slider;
-extern lv_obj_t *ui_bl_toggle;
+extern lv_obj_t *ui_battery_status_label;
 extern lv_obj_t *ui_wifi_setup_msg;
+extern lv_obj_t *ui_bl_toggle;
 extern lv_obj_t *ui_pixel_shift_toggle;
 extern lv_obj_t *ui_clock_button_toggle;
-extern lv_obj_t *ui_clock_saver_toggle;
 extern lv_obj_t *ui_timezone_button;
 extern lv_obj_t *ui_timezone_value_label;
 extern lv_obj_t *ui_timezone_status_label;
@@ -159,7 +166,6 @@ extern lv_point_t master_minute_points[2];
 extern lv_point_t master_second_points[2];
 extern lv_point_t master_weather_sun_ray_points[8][2];
 
-extern lv_timer_t *screen2_timer;
 extern WebServer weather_config_server;
 extern WebServer provisioning_server;
 extern DNSServer provisioning_dns_server;
@@ -167,13 +173,16 @@ extern DNSServer provisioning_dns_server;
 extern int global_brightness;
 extern int current_display_brightness;
 extern int display_ui_rotation_degrees;
-extern bool screen2_bl_always_on;
 extern bool oled_pixel_shift_enabled;
-extern bool oled_clock_saver_enabled;
 extern bool clock_button_screen_enabled;
 extern bool clock_button_screen_first;
-extern uint32_t clock_saver_idle_ms;
-extern bool screensaver_visible;
+extern bool screen2_bl_always_on;
+extern bool screen2_backlight_timed_out;
+extern lv_timer_t *screen2_timer;
+extern StandbyMode standby_mode;
+extern uint32_t standby_idle_ms;
+extern int standby_brightness;
+extern bool standby_active;
 extern int pixel_shift_x;
 extern int pixel_shift_y;
 extern int timezone_index;
@@ -216,11 +225,60 @@ void safeSetBrightness(int target_brightness);
 bool supportsPixelShift();
 bool supportsClockSaver();
 bool isPixelShiftEnabled();
-bool isClockSaverEnabled();
+bool isStandbyEnabled();
+bool isStandbyClockMode();
 bool isClockButtonEnabled();
 bool isWeatherEnabled();
 bool shouldShowClockWeather();
-int screensaverBrightness();
+int effectiveStandbyBrightness();
+int currentBrightnessTarget();
 int pixelShiftSafeCropInset();
 bool isValidWeatherCoordinates(float latitude, float longitude);
 bool hasCustomWeatherLocation();
+
+void updateLVGLState(uint8_t id, bool state);
+
+class MySwitch : public Service::Switch {
+  public:
+    explicit MySwitch(uint8_t id) : Service::Switch(), switchId(id)
+    {
+        on = new Characteristic::On(false);
+    }
+
+    bool update() override
+    {
+        updateLVGLState(switchId, on->getNewVal());
+        return true;
+    }
+
+    uint8_t switchId;
+    Characteristic::On *on = nullptr;
+};
+
+extern MySwitch *homekit_switches[kNumSwitches];
+
+// Cross-module helpers (defined outside main.cpp, used across modules)
+void openTimezoneModal();
+void closeTimezoneModal();
+void openWeatherSetupModal();
+void closeWeatherSetupModal();
+void updateScrollbarModes();
+void updateSettingsWebLinksLabel();
+void updateBatteryStatusLabel();
+
+// Settings helpers (defined in main.cpp, used by web_admin and weather modules)
+void scheduleReboot(uint32_t delay_ms = kDeferredRebootMs);
+void processScheduledReboot();
+const char *selectedTimezoneLabel();
+const char *selectedTimezoneRule();
+void applyTimezoneSettingIndex(int index, bool persist);
+void applyTimezoneSetting(bool request_sync);
+void applyNewColor(lv_color_t new_color);
+void applyBrightnessSetting(int brightness, bool persist);
+void applyDisplayRotationSetting(int degrees, bool persist);
+void applyScreen2BacklightSetting(bool always_on, bool persist);
+void setWifiSetupInfoVisible(bool visible, bool force_main_tile);
+void updateWiFiSymbol();
+void getScreensaverClockTime(int &hour, int &minute, int &second);
+bool isMasterClockTileActive();
+void updateMasterClock(bool force);

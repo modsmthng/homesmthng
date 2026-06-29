@@ -15,6 +15,13 @@ enum class TouchBackendKind {
     None,
 };
 
+enum class BatteryBackendKind {
+    None,
+    TrgbAdc,
+    Sy6970,
+    Axp2101,
+};
+
 struct UiMetrics {
     int display_width;
     int display_height;
@@ -39,6 +46,7 @@ struct BoardProfile {
     const char *accessory_name;
     DisplayBackendKind display_backend;
     TouchBackendKind touch_backend;
+    BatteryBackendKind battery_backend;
     UiMetrics ui;
     int brightness_levels;
     int qspi_cs;
@@ -61,6 +69,7 @@ struct BoardProfile {
     bool touch_swap_xy;
     bool touch_mirror_x;
     bool touch_mirror_y;
+    int battery_adc_pin;
 };
 
 const BoardProfile &getBoardProfile();

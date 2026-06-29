@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="Install or update HOMEsmthng firmware from a supported desktop browser."
+    />
+    <title>HOMEsmthng Installer</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">Browser installer</p>
+        <h1>HOMEsmthng</h1>
+        <p class="intro">
+          Install or update your display directly from Chrome or Edge on a desktop computer.
+        </p>
+        <p class="version" id="version-label" aria-live="polite">Loading latest release…</p>
+      </header>
+
+      <div class="notice notice-error" id="support-notice" role="alert" hidden>
+        This installer needs desktop Chrome or Edge and a secure HTTPS connection.
+      </div>
+
+      <form id="installer-form" novalidate>
+        <section class="step" aria-labelledby="display-heading">
+          <div class="step-number" aria-hidden="true">1</div>
+          <div class="step-content">
+            <h2 id="display-heading">Choose your display</h2>
+            <p class="step-copy">Select the exact model connected to this computer.</p>
+            <div class="option-grid" id="board-options" role="radiogroup" aria-label="Display model"></div>
+          </div>
+        </section>
+
+        <section class="step" aria-labelledby="action-heading">
+          <div class="step-number" aria-hidden="true">2</div>
+          <div class="step-content">
+            <h2 id="action-heading">Choose what to do</h2>
+            <div class="option-grid action-grid" role="radiogroup" aria-label="Installation type">
+              <label class="option-card recommended">
+                <input type="radio" name="flash-mode" value="update" />
+                <span class="option-body">
+                  <span class="option-heading">
+                    <strong>Update</strong>
+                    <span class="badge">Recommended</span>
+                  </span>
+                  <span>Keep Wi-Fi, HomeKit pairing and all display settings.</span>
+                </span>
+              </label>
+              <label class="option-card">
+                <input type="radio" name="flash-mode" value="install" />
+                <span class="option-body">
+                  <strong>Install / Reinstall</strong>
+                  <span>Erase the entire display and start with a clean installation.</span>
+                </span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="step" id="connect-step" aria-labelledby="connect-heading">
+          <div class="step-number" aria-hidden="true">3</div>
+          <div class="step-content">
+            <h2 id="connect-heading">Connect and flash</h2>
+            <div class="selection-summary" id="selection-summary" aria-live="polite">
+              Choose a display and an action to continue.
+            </div>
+            <button class="primary-button" id="start-button" type="submit" disabled>
+              Continue
+            </button>
+          </div>
+        </section>
+      </form>
+
+      <section class="flash-status" id="flash-status" aria-live="polite" hidden>
+        <div class="status-row">
+          <strong id="status-title">Preparing…</strong>
+          <span id="status-percent">0%</span>
+        </div>
+        <progress id="flash-progress" max="100" value="0">0%</progress>
+        <p id="status-message">Do not disconnect the display while flashing.</p>
+      </section>
+
+      <div class="notice notice-success" id="success-notice" role="status" hidden>
+        <strong>Finished.</strong>
+        <span id="success-message">HOMEsmthng is restarting.</span>
+      </div>
+
+      <div class="notice notice-error" id="error-notice" role="alert" hidden>
+        <strong>Flashing did not finish.</strong>
+        <span id="error-message">Reconnect the display and try again.</span>
+      </div>
+
+      <details class="help-card">
+        <summary>Connection help</summary>
+        <ol>
+          <li>Use a USB data cable and close every serial monitor.</li>
+          <li>Click the connect button and select the display's serial port.</li>
+          <li>
+            If it does not connect, hold <strong>BOOT</strong>, press and release
+            <strong>RESET</strong>, then release <strong>BOOT</strong> and try again.
+          </li>
+        </ol>
+      </details>
+
+      <details class="help-card log-card" id="log-card">
+        <summary>Technical details</summary>
+        <pre id="technical-log" tabindex="0"></pre>
+      </details>
+
+      <footer>
+        <a href="https://github.com/modsmthng/homesmthng">Source on GitHub</a>
+      </footer>
+    </main>
+
+    <dialog id="erase-dialog" aria-labelledby="erase-title">
+      <form method="dialog" class="dialog-card">
+        <p class="eyebrow danger-text">Permanent data loss</p>
+        <h2 id="erase-title">Erase and reinstall HOMEsmthng?</h2>
+        <p>
+          Wi-Fi credentials, HomeKit pairing and all display settings will be deleted from
+          <strong id="erase-board-name">this display</strong>.
+        </p>
+        <label class="confirmation-check">
+          <input type="checkbox" id="erase-confirmation" />
+          <span>I understand that all data will be erased.</span>
+        </label>
+        <div class="dialog-actions">
+          <button class="secondary-button" value="cancel">Cancel</button>
+          <button class="danger-button" id="erase-button" value="default" disabled>
+            Erase &amp; install
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
