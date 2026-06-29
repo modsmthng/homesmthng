@@ -1,8 +1,8 @@
 # HOMEsmthng
 
-The latest published release can be installed from
+**_The latest published release can be installed from
 [modsmthng.github.io/homesmthng](https://modsmthng.github.io/homesmthng/) using
-desktop Chrome or Edge and a USB data cable.
+desktop Chrome or Edge and a USB data cable._**
 
 HOMEsmthng turns supported ESP32-S3 display boards into a HomeKit smart switch dashboard powered by HomeSpan and LVGL.
 
