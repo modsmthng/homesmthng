@@ -6,6 +6,7 @@
 #include "app_utils.h"
 #include "battery_monitor.h"
 #include "settings_store.h"
+#include "homesmthng_version.h"
 #include "weather.h"
 #include "clock_ui.h"
 
@@ -232,6 +233,9 @@ String renderAdminPage(
     const String escaped_direct_url = htmlEscape(direct_url);
     const String escaped_setup_url = htmlEscape(setup_url);
     const String escaped_stored_ssid = htmlEscape(stored_ssid);
+    const String escaped_firmware_version = htmlEscape(String(kHomesmthngVersion));
+    const String firmware_updater_url = String("https://modsmthng.github.io/homesmthng/?board=")
+        + boardProfile().id + "&amp;action=update";
     const String active_color_css = colorHexCss(active_switch_color_hex);
     const int brightness_scale_value = brightnessScaleForWeb(global_brightness);
     const int standby_brightness_scale_value = brightnessScaleForWeb(standby_brightness);
@@ -307,6 +311,12 @@ String renderAdminPage(
     }
     page += FPSTR(ADMIN_STATUS_CARD_HOMEKIT);
     page += homekit_is_paired ? F("Paired") : F("Not paired yet");
+    page += FPSTR(ADMIN_STATUS_CARD_FIRMWARE);
+    page += escaped_firmware_version;
+    page += FPSTR(ADMIN_STATUS_CARD_UPDATE);
+    page += escaped_firmware_version;
+    page += FPSTR(ADMIN_STATUS_CARD_UPDATER);
+    page += firmware_updater_url;
     page += FPSTR(ADMIN_STATUS_CARD_END);
 
     // HomeKit section
@@ -634,6 +644,7 @@ String renderAdminPage(
 
     // JS + footer
     page += FPSTR(ADMIN_JS);
+    page += FPSTR(ADMIN_UPDATE_JS);
     page += FPSTR(ADMIN_FOOTER);
 
     return page;

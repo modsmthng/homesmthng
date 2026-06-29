@@ -24,6 +24,17 @@ export function canStartFlash(boardId, mode) {
   return Boolean(boardId) && Object.values(FLASH_MODE).includes(mode);
 }
 
+export function resolveInstallerSelection(search, boards) {
+  const params = new URLSearchParams(search);
+  const requestedBoard = params.get("board") || "";
+  const requestedMode = params.get("action") || "";
+
+  return {
+    boardId: boards.some((board) => board.id === requestedBoard) ? requestedBoard : "",
+    mode: Object.values(FLASH_MODE).includes(requestedMode) ? requestedMode : "",
+  };
+}
+
 export function requiresEraseConfirmation(mode) {
   return mode === FLASH_MODE.INSTALL;
 }

@@ -11,6 +11,7 @@ import {
   isSupportedChip,
   isSupportedEnvironment,
   requiresEraseConfirmation,
+  resolveInstallerSelection,
   validateFirmwareIndex,
 } from "../src/flash-config.js";
 
@@ -57,6 +58,26 @@ test("a board and a known action are both required", () => {
   assert.equal(canStartFlash("", FLASH_MODE.UPDATE), false);
   assert.equal(canStartFlash("trgb_full_circle", ""), false);
   assert.equal(canStartFlash("trgb_full_circle", "erase-something"), false);
+});
+
+test("installer links can preselect every supported board for an update", () => {
+  for (const board of sampleIndex.boards) {
+    assert.deepEqual(
+      resolveInstallerSelection(`?board=${board.id}&action=update`, sampleIndex.boards),
+      { boardId: board.id, mode: FLASH_MODE.UPDATE },
+    );
+  }
+});
+
+test("unknown installer link parameters are ignored independently", () => {
+  assert.deepEqual(
+    resolveInstallerSelection("?board=unknown&action=update", sampleIndex.boards),
+    { boardId: "", mode: FLASH_MODE.UPDATE },
+  );
+  assert.deepEqual(
+    resolveInstallerSelection("?board=trgb_full_circle&action=erase", sampleIndex.boards),
+    { boardId: "trgb_full_circle", mode: "" },
+  );
 });
 
 test("only a clean installation requires destructive confirmation", () => {

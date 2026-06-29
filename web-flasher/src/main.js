@@ -5,6 +5,7 @@ import {
   canStartFlash,
   isSupportedEnvironment,
   requiresEraseConfirmation,
+  resolveInstallerSelection,
   validateFirmwareIndex,
 } from "./flash-config.js";
 import { flashDisplay } from "./flasher.js";
@@ -89,6 +90,7 @@ function renderBoards(boards) {
     input.type = "radio";
     input.name = "display-board";
     input.value = board.id;
+    input.checked = board.id === selectedBoardId;
     input.disabled = busy || !environmentSupported;
 
     const body = document.createElement("span");
@@ -229,7 +231,16 @@ async function initialize() {
     }
     firmwareIndex = validateFirmwareIndex(await response.json());
     elements.versionLabel.textContent = `Latest release: ${firmwareIndex.version}`;
+    const selection = resolveInstallerSelection(window.location.search, firmwareIndex.boards);
+    selectedBoardId = selection.boardId;
+    selectedMode = selection.mode;
     renderBoards(firmwareIndex.boards);
+    if (selectedMode) {
+      const modeInput = elements.form.querySelector(`input[name="flash-mode"][value="${selectedMode}"]`);
+      if (modeInput) {
+        modeInput.checked = true;
+      }
+    }
     updateSelection();
   } catch (error) {
     elements.versionLabel.textContent = "Firmware is currently unavailable.";

@@ -151,8 +151,20 @@ static const char ADMIN_STATUS_CARD_HOMEKIT[] PROGMEM = R"html(
 </span>
 <strong>HomeKit</strong><span><a class="status-link" href="/?section=homekit">)html";
 
-static const char ADMIN_STATUS_CARD_END[] PROGMEM = R"html(
+static const char ADMIN_STATUS_CARD_FIRMWARE[] PROGMEM = R"html(
 </a></span>
+<strong>Firmware version</strong><span class="mono">)html";
+
+static const char ADMIN_STATUS_CARD_UPDATE[] PROGMEM = R"html(
+</span>
+<strong>Update</strong><span id="firmware-update-status" data-current-version=")html";
+
+static const char ADMIN_STATUS_CARD_UPDATER[] PROGMEM = R"html(
+">Checking&hellip;</span>
+<strong>Firmware updater</strong><span><a class="status-link" target="_blank" rel="noopener noreferrer" href=")html";
+
+static const char ADMIN_STATUS_CARD_END[] PROGMEM = R"html(
+">Open firmware updater</a></span>
 </div></div>)html";
 
 // Section card wrappers
@@ -623,6 +635,62 @@ if(weather&&(window.location.pathname.indexOf('/weather')===0||params.get('secti
 setTimeout(function(){weather.scrollIntoView({block:'start'});},50);
 }
 });
+</script>)js";
+
+static const char ADMIN_UPDATE_JS[] PROGMEM = R"js(
+<script>
+function parseSemanticVersion(value){
+const match=/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec((value||'').trim());
+if(!match){return null;}
+const prerelease=match[4]?match[4].split('.'):[];
+if(prerelease.some(part=>/^\d+$/.test(part)&&part.length>1&&part[0]==='0')){return null;}
+return {core:[Number(match[1]),Number(match[2]),Number(match[3])],prerelease:prerelease};
+}
+function compareSemanticVersions(leftValue,rightValue){
+const left=parseSemanticVersion(leftValue);
+const right=parseSemanticVersion(rightValue);
+if(!left||!right){return null;}
+for(let i=0;i<3;i+=1){
+if(left.core[i]!==right.core[i]){return left.core[i]<right.core[i]?-1:1;}
+}
+if(left.prerelease.length===0||right.prerelease.length===0){
+if(left.prerelease.length===right.prerelease.length){return 0;}
+return left.prerelease.length===0?1:-1;
+}
+const count=Math.max(left.prerelease.length,right.prerelease.length);
+for(let i=0;i<count;i+=1){
+if(i>=left.prerelease.length){return -1;}
+if(i>=right.prerelease.length){return 1;}
+const leftPart=left.prerelease[i];
+const rightPart=right.prerelease[i];
+if(leftPart===rightPart){continue;}
+const leftNumeric=/^\d+$/.test(leftPart);
+const rightNumeric=/^\d+$/.test(rightPart);
+if(leftNumeric&&rightNumeric){return Number(leftPart)<Number(rightPart)?-1:1;}
+if(leftNumeric!==rightNumeric){return leftNumeric?-1:1;}
+return leftPart<rightPart?-1:1;
+}
+return 0;
+}
+async function checkForFirmwareUpdate(){
+const status=document.getElementById('firmware-update-status');
+if(!status){return;}
+try{
+const response=await fetch('https://modsmthng.github.io/homesmthng/firmware-index.json',{cache:'no-store'});
+if(!response.ok){throw new Error('Firmware index unavailable');}
+const index=await response.json();
+const latest=typeof index.version==='string'?index.version.trim():'';
+if(!latest){throw new Error('Firmware version unavailable');}
+const comparison=compareSemanticVersions(status.dataset.currentVersion,latest);
+if(comparison===null){status.textContent='Latest release: '+latest;}
+else if(comparison<0){status.textContent=latest+' available';}
+else if(comparison===0){status.textContent='Up to date';}
+else{status.textContent='Newer than published release';}
+}catch(error){
+status.textContent='Check unavailable';
+}
+}
+document.addEventListener('DOMContentLoaded',function(){void checkForFirmwareUpdate();});
 </script>)js";
 
 static const char ADMIN_FOOTER[] PROGMEM = R"html(

@@ -34,7 +34,7 @@ PARTS = (
     ("firmware", "firmware.bin", 0x10000),
 )
 
-SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 def sha256(path: Path) -> str:
@@ -68,7 +68,7 @@ def main() -> None:
     args = parse_args()
     version = args.version.strip()
     if not SAFE_VERSION.fullmatch(version):
-        raise ValueError("Version must contain only letters, numbers, dots, underscores and hyphens.")
+        raise ValueError("Version must contain only letters, numbers, dots, underscores, plus signs and hyphens.")
 
     build_root = args.build_root.resolve()
     output_root = args.output.resolve()
