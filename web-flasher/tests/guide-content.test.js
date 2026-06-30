@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { guideContent, isExternalUrl, isYouTubeId } from "../guide/content.js";
+
+const guideHtml = await readFile(new URL("../guide/index.html", import.meta.url), "utf8");
 
 const expectedBoardIds = [
   "trgb_full_circle",
@@ -30,6 +33,13 @@ const expectedScreenshots = [
   "web-appearance-standby.png",
   "web-time-weather-battery.png",
 ];
+
+test("guide hero explains the project before the getting-started instructions", () => {
+  const description = "HOMEsmthng turns supported ESP32-S3 display boards into a customizable HomeKit smart";
+  const instructions = "Choose one of three supported round displays";
+  assert.ok(guideHtml.indexOf(description) >= 0);
+  assert.ok(guideHtml.indexOf(description) < guideHtml.indexOf(instructions));
+});
 
 test("guide contains every supported board in firmware order", () => {
   assert.deepEqual(guideContent.boards.map((board) => board.id), expectedBoardIds);
