@@ -161,8 +161,8 @@ async function beginFlash() {
     elements.flashStatus.hidden = true;
     elements.successNotice.hidden = false;
     elements.successMessage.textContent = selectedMode === FLASH_MODE.INSTALL
-      ? "HOMEsmthng is restarting. Set up Wi-Fi and pair it with Apple Home again."
-      : "HOMEsmthng is restarting with your existing settings.";
+      ? "Unplug and reconnect the USB cable to restart HOMEsmthng. Then set up Wi-Fi and pair it with Apple Home again."
+      : "Unplug and reconnect the USB cable to restart HOMEsmthng with your existing settings.";
   } catch (error) {
     appendLog(`Error: ${friendlyError(error)}`);
     elements.flashStatus.hidden = true;
