@@ -305,10 +305,66 @@ h3 {
   aspect-ratio: 1;
 }
 
-.media-frame img {
+.media-zoom-button {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
   width: 100%;
   height: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: zoom-in;
+}
+
+.media-zoom-button:disabled {
+  pointer-events: none;
+}
+
+.media-zoom-button::after {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgb(13 16 17 / 78%);
+  color: #fff;
+  content: "View larger";
+  font-size: 0.68rem;
+  font-weight: 700;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.media-zoom-button:hover::after,
+.media-zoom-button:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.media-zoom-button:focus-visible {
+  outline-offset: -4px;
+}
+
+.media-frame > img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
   object-fit: cover;
+}
+
+.media-square .media-frame > img {
+  inset: 10px;
+  width: calc(100% - 20px);
+  height: calc(100% - 20px);
+  border-radius: 10px;
+  object-fit: contain;
 }
 
 .media-fallback {
@@ -336,6 +392,10 @@ h3 {
   border-style: solid;
 }
 
+.media-frame.has-image > img {
+  opacity: 1;
+}
+
 .media-frame.has-image .media-fallback {
   display: none;
 }
@@ -344,6 +404,68 @@ h3 {
   margin-top: 8px;
   color: var(--muted);
   font-size: 0.75rem;
+}
+
+.image-lightbox {
+  width: min(1500px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 30px 100px rgb(0 0 0 / 55%);
+}
+
+.image-lightbox::backdrop {
+  background: rgb(0 0 0 / 82%);
+  backdrop-filter: blur(5px);
+}
+
+.image-lightbox-panel {
+  position: relative;
+  display: grid;
+  min-height: 120px;
+  max-height: calc(100vh - 34px);
+  padding: 52px 16px 16px;
+  place-items: center;
+}
+
+.image-lightbox img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 130px);
+  border-radius: 12px;
+  object-fit: contain;
+}
+
+.image-lightbox p {
+  margin: 12px 40px 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.image-lightbox-close {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 1.45rem;
+  line-height: 1;
+  place-items: center;
 }
 
 .safety-card {

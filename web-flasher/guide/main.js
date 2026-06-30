@@ -3,6 +3,30 @@ import "./styles.css";
 
 import { guideContent, isExternalUrl, isYouTubeId } from "./content.js";
 
+const lightbox = document.querySelector("#image-lightbox");
+const lightboxImage = document.querySelector("#image-lightbox-image");
+const lightboxCaption = document.querySelector("#image-lightbox-caption");
+const lightboxClose = document.querySelector("#image-lightbox-close");
+
+function openImageLightbox({ src, alt, title }) {
+  lightboxImage.src = src;
+  lightboxImage.alt = alt;
+  lightboxCaption.textContent = title || alt;
+  lightbox.showModal();
+}
+
+lightboxClose.addEventListener("click", () => lightbox.close());
+lightbox.addEventListener("click", (event) => {
+  if (event.target === lightbox) {
+    lightbox.close();
+  }
+});
+lightbox.addEventListener("close", () => {
+  lightboxImage.removeAttribute("src");
+  lightboxImage.alt = "";
+  lightboxCaption.textContent = "";
+});
+
 function createExternalLink(action) {
   if (!action?.url || !isExternalUrl(action.url)) {
     const pending = document.createElement("span");
@@ -31,7 +55,15 @@ function createMediaSlot({ file, title, alt }, shape = "wide") {
   image.src = file;
   image.alt = alt;
   image.loading = "lazy";
-  image.hidden = true;
+
+  const zoomButton = document.createElement("button");
+  zoomButton.className = "media-zoom-button";
+  zoomButton.type = "button";
+  zoomButton.disabled = true;
+  zoomButton.setAttribute("aria-label", `Enlarge ${title || alt}`);
+  zoomButton.addEventListener("click", () => {
+    openImageLightbox({ src: file, alt, title });
+  });
 
   const fallback = document.createElement("div");
   fallback.className = "media-fallback";
@@ -42,15 +74,15 @@ function createMediaSlot({ file, title, alt }, shape = "wide") {
   fallback.append(fallbackTitle, fallbackFile);
 
   image.addEventListener("load", () => {
-    image.hidden = false;
+    zoomButton.disabled = false;
     frame.classList.add("has-image");
   });
   image.addEventListener("error", () => {
-    image.hidden = true;
+    zoomButton.disabled = true;
     frame.classList.remove("has-image");
   });
 
-  frame.append(image, fallback);
+  frame.append(image, zoomButton, fallback);
   figure.append(frame);
   if (title) {
     const caption = document.createElement("figcaption");

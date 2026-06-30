@@ -57,6 +57,9 @@ test("hardware comparison contains only the eight beginner-facing rows", () => {
 
 test("case guidance includes the required screw information", () => {
   const [trgb, lilygo, waveshare] = guideContent.boards;
+  for (const board of guideContent.boards) {
+    assert.match(board.case.text, /Different housings are available in the smthng display housing collection/);
+  }
   assert.match(trgb.case.text, /No screws are required/);
   assert.match(lilygo.case.text, /1\.4 mm × 5 mm screws/);
   assert.match(lilygo.case.text, /do not use M2 screws/);

@@ -228,7 +228,8 @@ void loadSettingsFromNVS()
     standby_idle_ms = preferences.getUInt(
         "stby_idle",
         preferences.getUInt("clock_idle", kStandbyIdleMs));
-    standby_brightness = preferences.getInt("stby_bri", global_brightness);
+    const int default_standby_brightness = brightnessLevelFromWebScale(kDefaultStandbyBrightnessScale);
+    standby_brightness = preferences.getInt("stby_bri", default_standby_brightness);
     timezone_index = preferences.getInt("tz_idx", kDefaultTimezoneIndex);
     weather_enabled = preferences.getBool("wx_enabled", true);
     weather_use_custom_location = preferences.getBool("wx_custom", false);

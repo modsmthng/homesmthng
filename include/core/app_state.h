@@ -23,6 +23,7 @@ constexpr int kNumTimezones = 9;
 constexpr int kTimezoneVisibleRows = 5;
 constexpr int kWebBrightnessScaleMax = 10;
 constexpr int kDefaultBrightnessScale = 8;
+constexpr int kDefaultStandbyBrightnessScale = 2;
 constexpr uint32_t kDefaultColorHex = 0xF5F1E8;
 constexpr uint32_t kStandbyIdleMs = 60000;
 constexpr uint32_t kStandbyMinIdleMs = 10000;
