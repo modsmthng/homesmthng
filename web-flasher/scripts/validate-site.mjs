@@ -8,6 +8,8 @@ const requiredFiles = [
   "index.html",
   "guide/index.html",
   "guide/screenshots/README.md",
+  "legal/index.html",
+  "privacy/index.html",
   "firmware-index.json",
 ];
 
@@ -18,9 +20,19 @@ for (const relativePath of requiredFiles) {
 
 const installerHtml = await readFile(path.join(outputDirectory, "index.html"), "utf8");
 const guideHtml = await readFile(path.join(outputDirectory, "guide/index.html"), "utf8");
+const legalHtml = await readFile(path.join(outputDirectory, "legal/index.html"), "utf8");
+const privacyHtml = await readFile(path.join(outputDirectory, "privacy/index.html"), "utf8");
 assert.match(installerHtml, /HOMEsmthng Installer/);
 assert.match(installerHtml, /Setup guide/);
+assert.match(installerHtml, /Legal notice/);
+assert.match(installerHtml, /Privacy/);
 assert.match(guideHtml, /HOMEsmthng Setup Guide/);
 assert.match(guideHtml, /Open browser installer/);
+assert.match(guideHtml, /Legal notice/);
+assert.match(guideHtml, /Privacy/);
+assert.match(legalHtml, /Legal notice \(Impressum\)/);
+assert.match(legalHtml, /Andr(?:é|&eacute;) Tolksdorf/);
+assert.match(privacyHtml, /Privacy policy/);
+assert.match(privacyHtml, /GitHub Pages/);
 
-console.log("Validated installer and beginner guide output.");
+console.log("Validated installer, beginner guide and legal information output.");

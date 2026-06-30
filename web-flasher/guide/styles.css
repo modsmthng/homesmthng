@@ -190,6 +190,10 @@ h3 {
   border: 0;
 }
 
+.video-consent-button {
+  margin-top: 0.4rem;
+}
+
 .scroll-hint {
   display: none;
   color: var(--muted);
@@ -476,10 +480,25 @@ h3 {
   padding: 36px 0 50px;
   border-top: 1px solid var(--border);
   align-items: baseline;
-  justify-content: center;
+  justify-content: space-between;
   gap: 7px;
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.guide-footer > div,
+.guide-footer nav {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.guide-footer nav a {
+  color: var(--muted);
+}
+
+.guide-footer nav a:hover {
+  color: var(--text);
 }
 
 .guide-footer strong {
@@ -558,6 +577,11 @@ h3 {
   }
 
   .help-section {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .guide-footer {
     align-items: flex-start;
     flex-direction: column;
   }

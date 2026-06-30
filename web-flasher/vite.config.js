@@ -30,6 +30,8 @@ export default defineConfig({
       input: {
         installer: path.join(rootDirectory, "index.html"),
         guide: path.join(rootDirectory, "guide/index.html"),
+        legal: path.join(rootDirectory, "legal/index.html"),
+        privacy: path.join(rootDirectory, "privacy/index.html"),
       },
     },
   },

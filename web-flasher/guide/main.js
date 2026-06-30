@@ -63,13 +63,28 @@ function createMediaSlot({ file, title, alt }, shape = "wide") {
 function renderVideo() {
   const container = document.querySelector("#video-container");
   if (isYouTubeId(guideContent.video.youtubeId)) {
-    const iframe = document.createElement("iframe");
-    iframe.src = `https://www.youtube-nocookie.com/embed/${guideContent.video.youtubeId}`;
-    iframe.title = guideContent.video.title;
-    iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
-    iframe.allowFullscreen = true;
-    container.classList.add("has-video");
-    container.append(iframe);
+    const title = document.createElement("strong");
+    title.textContent = guideContent.video.title;
+    const copy = document.createElement("span");
+    copy.textContent = "YouTube will receive data only after you choose to load the video.";
+    const button = document.createElement("button");
+    button.className = "button button-primary video-consent-button";
+    button.type = "button";
+    button.textContent = "Load video from YouTube";
+    button.addEventListener("click", () => {
+      const iframe = document.createElement("iframe");
+      iframe.src = `https://www.youtube-nocookie.com/embed/${guideContent.video.youtubeId}?autoplay=1`;
+      iframe.title = guideContent.video.title;
+      iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+      iframe.allowFullscreen = true;
+      container.replaceChildren(iframe);
+      container.classList.add("has-video");
+    });
+    const privacy = document.createElement("a");
+    privacy.className = "inline-link";
+    privacy.href = "../privacy/#youtube";
+    privacy.textContent = "Privacy information";
+    container.append(title, copy, button, privacy);
     return;
   }
 
