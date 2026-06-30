@@ -87,12 +87,17 @@ without deploying the site.
 
 ## Project Layout
 
-- `src/main.cpp`: application logic, HomeSpan setup, and LVGL UI
-- `src/display_backend.cpp`: board-specific display, touch, and LVGL backend code
-- `src/board_profile.cpp`: compile-time board definitions and panel metadata
-- `include/`: shared headers and LVGL configuration
+- `platformio.ini`: shared build configuration and the three supported board environments
+- `src/main.cpp`: high-level firmware orchestration and the HomeSpan/LVGL callback graph
+- `src/core/`: shared application state, settings persistence, utilities, and board profiles
+- `src/display/`: LVGL UI setup, standby/clock behavior, and board-specific display and touch backends
+- `src/hardware/`: hardware services such as battery and charging telemetry
+- `src/services/`: weather handling, provisioning, and the local web administration UI
+- `include/`: public headers for the firmware modules plus the LVGL configuration
 - `boards/`: local PlatformIO board definitions
-- `pictures/`: hardware reference photos used during bring-up and UI tuning
+- `web-flasher/`: static browser installer, firmware manifest validation, and automated tests
+- `scripts/`: PlatformIO build helpers and browser-flasher release asset generation
+- `.github/workflows/`: CI builds and GitHub Pages deployment for published firmware releases
 
 ## Board Notes
 
