@@ -1,0 +1,140 @@
+import "../src/theme.css";
+import "./styles.css";
+
+import { guideContent, isExternalUrl, isYouTubeId } from "./content.js";
+
+function createExternalLink(action) {
+  if (!action?.url || !isExternalUrl(action.url)) {
+    const pending = document.createElement("span");
+    pending.className = "pending-link";
+    pending.textContent = action?.label || "Coming soon";
+    return pending;
+  }
+
+  const anchor = document.createElement("a");
+  anchor.className = "inline-link";
+  anchor.href = action.url;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  anchor.textContent = action.label;
+  return anchor;
+}
+
+function createMediaSlot({ file, title, alt }, shape = "wide") {
+  const figure = document.createElement("figure");
+  figure.className = `media-slot media-${shape}`;
+
+  const frame = document.createElement("div");
+  frame.className = "media-frame";
+
+  const image = document.createElement("img");
+  image.src = file;
+  image.alt = alt;
+  image.loading = "lazy";
+  image.hidden = true;
+
+  const fallback = document.createElement("div");
+  fallback.className = "media-fallback";
+  const fallbackTitle = document.createElement("strong");
+  fallbackTitle.textContent = "Screenshot placeholder";
+  const fallbackFile = document.createElement("code");
+  fallbackFile.textContent = file.split("/").pop();
+  fallback.append(fallbackTitle, fallbackFile);
+
+  image.addEventListener("load", () => {
+    image.hidden = false;
+    frame.classList.add("has-image");
+  });
+  image.addEventListener("error", () => {
+    image.hidden = true;
+    frame.classList.remove("has-image");
+  });
+
+  frame.append(image, fallback);
+  figure.append(frame);
+  if (title) {
+    const caption = document.createElement("figcaption");
+    caption.textContent = title;
+    figure.append(caption);
+  }
+  return figure;
+}
+
+function renderVideo() {
+  const container = document.querySelector("#video-container");
+  if (isYouTubeId(guideContent.video.youtubeId)) {
+    const iframe = document.createElement("iframe");
+    iframe.src = `https://www.youtube-nocookie.com/embed/${guideContent.video.youtubeId}`;
+    iframe.title = guideContent.video.title;
+    iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+    iframe.allowFullscreen = true;
+    container.classList.add("has-video");
+    container.append(iframe);
+    return;
+  }
+
+  const title = document.createElement("strong");
+  title.textContent = "Video guide coming soon";
+  const copy = document.createElement("span");
+  copy.textContent = "This will become the quickest way to see the complete build and setup process.";
+  container.append(title, copy);
+}
+
+function renderHardwareTable() {
+  const headerRow = document.querySelector("#hardware-header-row");
+  for (const board of guideContent.boards) {
+    const header = document.createElement("th");
+    header.scope = "col";
+    header.dataset.board = board.id;
+    header.append(createMediaSlot({ file: board.image, alt: board.imageAlt }, "square"));
+    const name = document.createElement("strong");
+    name.textContent = board.name;
+    header.append(name);
+    headerRow.append(header);
+  }
+
+  const body = document.querySelector("#hardware-table-body");
+  for (const row of guideContent.hardwareRows) {
+    const tableRow = document.createElement("tr");
+    const label = document.createElement("th");
+    label.scope = "row";
+    label.textContent = row.label;
+    tableRow.append(label);
+
+    for (const board of guideContent.boards) {
+      const cell = document.createElement("td");
+      const cellValue = board[row.key];
+      const copy = document.createElement("p");
+      copy.textContent = cellValue.text;
+      cell.append(copy);
+      if (cellValue.action) {
+        cell.append(createExternalLink(cellValue.action));
+      }
+      tableRow.append(cell);
+    }
+    body.append(tableRow);
+  }
+}
+
+function renderScreenshotCards(containerId, screenshots) {
+  const container = document.querySelector(containerId);
+  for (const screenshot of screenshots) {
+    const article = document.createElement("article");
+    article.className = "screenshot-card";
+    article.append(createMediaSlot(screenshot));
+    const body = document.createElement("div");
+    body.className = "screenshot-copy";
+    const title = document.createElement("h3");
+    title.textContent = screenshot.title;
+    const description = document.createElement("p");
+    description.textContent = screenshot.description;
+    body.append(title, description);
+    article.append(body);
+    container.append(article);
+  }
+}
+
+renderVideo();
+renderHardwareTable();
+renderScreenshotCards("#display-screenshots", guideContent.displayScreenshots);
+renderScreenshotCards("#web-screenshots", guideContent.webScreenshots);

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="A beginner-friendly guide to choosing, building, installing and using a HOMEsmthng display."
+    />
+    <title>HOMEsmthng Setup Guide</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="wordmark" href="./">HOMEsmthng <span>Guide</span></a>
+      <nav aria-label="Guide navigation">
+        <a href="#hardware">Hardware</a>
+        <a href="#install">Install</a>
+        <a href="#display-ui">Display UI</a>
+        <a href="#web-ui">Web UI</a>
+      </nav>
+    </header>
+
+    <main class="guide-shell">
+      <section class="guide-hero" aria-labelledby="guide-title">
+        <p class="eyebrow">Start here</p>
+        <h1 id="guide-title">Build your HOMEsmthng display.</h1>
+        <p class="hero-copy">
+          Choose one of three supported round displays, add the enclosure and power option that
+          fit your build, then install the firmware from a desktop browser. No programming required.
+        </p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#hardware">Choose a display</a>
+          <a class="button button-secondary" href="../" target="_blank" rel="noopener noreferrer">Open installer</a>
+        </div>
+      </section>
+
+      <section class="guide-section video-section" aria-labelledby="video-title">
+        <div class="section-heading">
+          <p class="eyebrow">Overview</p>
+          <h2 id="video-title">Watch the complete guide</h2>
+          <p>The upcoming video will be the fastest introduction to the hardware, installation and everyday use.</p>
+        </div>
+        <div class="video-container" id="video-container" aria-live="polite"></div>
+      </section>
+
+      <section class="guide-section" id="hardware" aria-labelledby="hardware-title">
+        <div class="section-heading">
+          <p class="eyebrow">Step 1</p>
+          <h2 id="hardware-title">Choose your hardware</h2>
+          <p>
+            Match the exact model name before buying. Similar-looking sizes and variants are not
+            interchangeable with the current firmware.
+          </p>
+        </div>
+
+        <p class="scroll-hint">On a small screen, swipe the table sideways to compare all displays.</p>
+        <div class="comparison-wrap" tabindex="0" role="region" aria-label="Supported display comparison">
+          <table class="comparison-table">
+            <caption class="visually-hidden">Hardware and power comparison for supported HOMEsmthng displays</caption>
+            <thead>
+              <tr id="hardware-header-row">
+                <th scope="col">Compare</th>
+              </tr>
+            </thead>
+            <tbody id="hardware-table-body"></tbody>
+          </table>
+        </div>
+
+        <aside class="safety-card" aria-labelledby="power-safety-title">
+          <h3 id="power-safety-title">Power and battery safety</h3>
+          <ul>
+            <li>Use a regulated 5 V USB supply. Its amp rating is available capacity; the display draws only what it needs.</li>
+            <li>For flashing, use a USB-C cable that carries data, not a charge-only cable.</li>
+            <li>Use only a protected single-cell 3.7 V LiPo on boards with a documented battery input.</li>
+            <li>Check connector polarity every time. A matching plug shape does not guarantee matching + and − wiring.</li>
+            <li>Keep the battery away from heat and sharp edges, and never use a swollen or damaged cell.</li>
+            <li>Do not overtighten enclosure screws; printed plastic and display boards can crack.</li>
+          </ul>
+        </aside>
+      </section>
+
+      <section class="guide-section install-section" id="install" aria-labelledby="install-title">
+        <div class="section-heading">
+          <p class="eyebrow">Step 2</p>
+          <h2 id="install-title">Install HOMEsmthng</h2>
+          <p>Use desktop Chrome or Edge, the exact display selection and a USB data cable.</p>
+        </div>
+        <ol class="install-steps">
+          <li><span>1</span><div><strong>Connect the display</strong><p>Plug it directly into your computer and close any serial monitor using the port.</p></div></li>
+          <li><span>2</span><div><strong>Choose the exact model</strong><p>Select Update to keep settings, or Install / Reinstall to erase the display completely.</p></div></li>
+          <li><span>3</span><div><strong>Flash and restart</strong><p>Wait for “Finished”, then unplug and reconnect the USB cable once to restart.</p></div></li>
+          <li><span>4</span><div><strong>Join 2.4 GHz Wi-Fi</strong><p>Follow the first-setup information on the display, then pair HOMEsmthng with Apple Home.</p></div></li>
+        </ol>
+        <a class="button button-primary installer-cta" href="../" target="_blank" rel="noopener noreferrer">Open browser installer</a>
+      </section>
+
+      <section class="guide-section" id="display-ui" aria-labelledby="display-ui-title">
+        <div class="section-heading">
+          <p class="eyebrow">Step 3</p>
+          <h2 id="display-ui-title">Use the display</h2>
+          <p>Tap controls directly and swipe between the switch, B1, clock and settings pages.</p>
+        </div>
+        <div class="screenshot-grid" id="display-screenshots"></div>
+      </section>
+
+      <section class="guide-section" id="web-ui" aria-labelledby="web-ui-title">
+        <div class="section-heading">
+          <p class="eyebrow">Step 4</p>
+          <h2 id="web-ui-title">Configure the Web UI</h2>
+          <p>
+            Open the local address shown on the display from a device on the same network. Changes
+            are saved on the display; no cloud account is required.
+          </p>
+        </div>
+        <div class="screenshot-grid" id="web-screenshots"></div>
+      </section>
+
+      <section class="guide-section help-section" aria-labelledby="help-title">
+        <div>
+          <p class="eyebrow">Need more detail?</p>
+          <h2 id="help-title">Keep the useful links nearby.</h2>
+          <p>Return to the installer for updates, or check the source repository for technical notes and known limitations.</p>
+        </div>
+        <div class="hero-actions">
+          <a class="button button-secondary" href="../" target="_blank" rel="noopener noreferrer">Firmware installer</a>
+          <a class="button button-secondary" href="https://github.com/modsmthng/homesmthng" target="_blank" rel="noopener noreferrer">GitHub repository</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="guide-footer">
+      <strong>HOMEsmthng</strong>
+      <span>by modsmthng</span>
+    </footer>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

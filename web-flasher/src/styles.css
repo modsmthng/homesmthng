@@ -1,70 +1,11 @@
-:root {
-  color-scheme: light dark;
-  --background: #0d1011;
-  --surface: #171b1d;
-  --surface-raised: #1e2426;
-  --text: #f4f4f1;
-  --muted: #adb5b8;
-  --border: #343b3e;
-  --accent: #a8c6fe;
-  --accent-strong: #c7dafe;
-  --accent-ink: #10161e;
-  --danger: #f28b82;
-  --danger-surface: #321d1c;
-  --success: #9bd5a5;
-  --success-surface: #173021;
-  --focus: #f5f1e8;
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-synthesis: none;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --background: #f5f3ed;
-    --surface: #fffdf8;
-    --surface-raised: #f2efe7;
-    --text: #171b1d;
-    --muted: #5e676b;
-    --border: #d2cec4;
-    --accent: #68724d;
-    --accent-strong: #56603d;
-    --accent-ink: #ffffff;
-    --danger: #a8322b;
-    --danger-surface: #fae8e5;
-    --success: #2d6a3b;
-    --success-surface: #e2f1e5;
-    --focus: #171b1d;
-  }
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-  background: var(--background);
-  color: var(--text);
-}
-
-button,
-input {
-  font: inherit;
-}
-
 button,
 .option-card,
 summary {
   -webkit-tap-highlight-color: transparent;
 }
 
-button:focus-visible,
-input:focus-visible,
 .option-card:focus-within,
-summary:focus-visible,
-a:focus-visible {
+dialog .confirmation-check:focus-within {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
@@ -311,10 +252,6 @@ progress {
   background: var(--success-surface);
 }
 
-[hidden] {
-  display: none !important;
-}
-
 .help-card summary {
   cursor: pointer;
   font-weight: 700;
@@ -338,8 +275,15 @@ progress {
 }
 
 footer {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
   padding-top: 28px;
   text-align: center;
+}
+
+footer span {
+  color: var(--border);
 }
 
 footer a {
@@ -409,14 +353,5 @@ dialog::backdrop {
 
   .option-card {
     min-height: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    transition: none !important;
   }
 }
