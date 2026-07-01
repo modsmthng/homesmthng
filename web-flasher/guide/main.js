@@ -112,11 +112,14 @@ function renderVideo() {
       container.replaceChildren(iframe);
       container.classList.add("has-video");
     });
-    const privacy = document.createElement("a");
-    privacy.className = "inline-link";
-    privacy.href = "../privacy/#youtube";
-    privacy.textContent = "Privacy information";
-    container.append(title, copy, button, privacy);
+    container.append(title, copy, button);
+    if (__HOMESMTHNG_LEGAL_PAGES__) {
+      const privacy = document.createElement("a");
+      privacy.className = "inline-link";
+      privacy.href = "../privacy/#youtube";
+      privacy.textContent = "Privacy information";
+      container.append(privacy);
+    }
     return;
   }
 

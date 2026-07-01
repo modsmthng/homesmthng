@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && node scripts/validate-site.mjs",
-    "test": "node --test tests/*.test.js",
+    "test": "node --test tests/*.test.js && node scripts/test-site-modes.mjs",
     "validate-release": "node scripts/validate-release.mjs"
   },
   "dependencies": {

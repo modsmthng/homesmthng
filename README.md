@@ -84,6 +84,14 @@ Source** to use **GitHub Actions**. Pull requests and pushes to `main` validate
 all firmware targets, the installer build, its manifest, and firmware checksums
 without deploying the site.
 
+Legal and privacy pages are intentionally not stored in this public repository.
+Deployments can overlay a self-contained legal-content directory by setting
+`LEGAL_CONTENT_DIR`. The official workflow checks out that directory from a
+separate private repository using the `LEGAL_CONTENT_REPOSITORY` and
+`LEGAL_CONTENT_PATH` repository variables plus the `LEGAL_CONTENT_TOKEN` secret.
+Forks without their own configuration publish neither the pages nor links to
+them; fork owners remain responsible for the notices required for their site.
+
 ## Project Layout
 
 - `platformio.ini`: shared build configuration and the three supported board environments

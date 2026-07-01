@@ -29,6 +29,33 @@ jobs:
         with:
           ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
 
+      - name: Verify official legal-content configuration
+        if: >-
+          (github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+          github.repository == 'modsmthng/homesmthng'
+        shell: bash
+        env:
+          LEGAL_CONTENT_REPOSITORY: ${{ vars.LEGAL_CONTENT_REPOSITORY }}
+          LEGAL_CONTENT_PATH: ${{ vars.LEGAL_CONTENT_PATH }}
+          LEGAL_CONTENT_TOKEN: ${{ secrets.LEGAL_CONTENT_TOKEN }}
+        run: |
+          if [[ -z "$LEGAL_CONTENT_REPOSITORY" || -z "$LEGAL_CONTENT_PATH" || -z "$LEGAL_CONTENT_TOKEN" ]]; then
+            echo "Official Pages deployments require the private legal-content repository, path and token."
+            exit 1
+          fi
+
+      - name: Check out private legal content
+        if: >-
+          (github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+          vars.LEGAL_CONTENT_REPOSITORY != ''
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ vars.LEGAL_CONTENT_REPOSITORY }}
+          ref: main
+          token: ${{ secrets.LEGAL_CONTENT_TOKEN }}
+          path: .legal-content
+          persist-credentials: false
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -84,6 +111,10 @@ jobs:
       - name: Build static installer
         env:
           FLASHER_PUBLIC_DIR: ${{ github.workspace }}/.flasher-release
+          LEGAL_CONTENT_DIR: >-
+            ${{ (github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+                vars.LEGAL_CONTENT_REPOSITORY != '' &&
+                format('{0}/.legal-content/{1}', github.workspace, vars.LEGAL_CONTENT_PATH) || '' }}
         run: npm run build --prefix web-flasher
 
       - name: Configure GitHub Pages
