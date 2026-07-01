@@ -37,10 +37,10 @@ jobs:
         env:
           LEGAL_CONTENT_REPOSITORY: ${{ vars.LEGAL_CONTENT_REPOSITORY }}
           LEGAL_CONTENT_PATH: ${{ vars.LEGAL_CONTENT_PATH }}
-          LEGAL_CONTENT_TOKEN: ${{ secrets.LEGAL_CONTENT_TOKEN }}
+          LEGAL_CONTENT_SSH_KEY: ${{ secrets.LEGAL_CONTENT_SSH_KEY }}
         run: |
-          if [[ -z "$LEGAL_CONTENT_REPOSITORY" || -z "$LEGAL_CONTENT_PATH" || -z "$LEGAL_CONTENT_TOKEN" ]]; then
-            echo "Official Pages deployments require the private legal-content repository, path and token."
+          if [[ -z "$LEGAL_CONTENT_REPOSITORY" || -z "$LEGAL_CONTENT_PATH" || -z "$LEGAL_CONTENT_SSH_KEY" ]]; then
+            echo "Official Pages deployments require the private legal-content repository, path and read-only deploy key."
             exit 1
           fi
 
@@ -52,7 +52,7 @@ jobs:
         with:
           repository: ${{ vars.LEGAL_CONTENT_REPOSITORY }}
           ref: main
-          token: ${{ secrets.LEGAL_CONTENT_TOKEN }}
+          ssh-key: ${{ secrets.LEGAL_CONTENT_SSH_KEY }}
           path: .legal-content
           persist-credentials: false
 

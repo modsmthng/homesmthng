@@ -88,7 +88,9 @@ Legal and privacy pages are intentionally not stored in this public repository.
 Deployments can overlay a self-contained legal-content directory by setting
 `LEGAL_CONTENT_DIR`. The official workflow checks out that directory from a
 separate private repository using the `LEGAL_CONTENT_REPOSITORY` and
-`LEGAL_CONTENT_PATH` repository variables plus the `LEGAL_CONTENT_TOKEN` secret.
+`LEGAL_CONTENT_PATH` repository variables plus the `LEGAL_CONTENT_SSH_KEY`
+secret. That secret contains a read-only deploy key registered on the private
+content repository.
 Forks without their own configuration publish neither the pages nor links to
 them; fork owners remain responsible for the notices required for their site.
 
